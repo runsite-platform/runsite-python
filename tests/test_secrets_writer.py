@@ -7,7 +7,8 @@ import pytest
 import respx
 
 from runsite._errors import ConfigurationError, ConflictError, NotFoundError, PermissionDeniedError
-from runsite._secrets import AsyncSecrets, Secrets
+from runsite._http import AsyncTransport, SyncTransport
+from runsite._secrets import ApplyResult, AsyncSecrets, BulkResult, Secrets
 from tests.constants import API_KEY, BASE_URL, SERVICE_ID
 
 ENV_PATH = f"/web-services/{SERVICE_ID}/env"
@@ -91,7 +92,7 @@ def test_explicit_secret_flag_on_create(api: respx.MockRouter, secrets: Secrets)
 
 def test_set_many_with_no_values_sends_nothing(secrets: Secrets) -> None:
     with respx.mock(assert_all_called=False) as router:
-        assert secrets.set_many({}).created == 0
+        assert secrets.set_many({}) == BulkResult(created=0, updated=0, deleted=0)
         assert router.calls.call_count == 0
 
 
@@ -157,6 +158,12 @@ def test_non_string_value_raises_type_error_without_echoing_it(secrets: Secrets)
         secrets.set("TOKEN", cast(Any, b"raw-bytes-value"))
     assert "TOKEN" in str(caught.value)
     assert "raw-bytes-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize("non_string_value", [8080, 1.5, True, None])
+def test_non_string_scalar_values_are_rejected(secrets: Secrets, non_string_value: object) -> None:
+    with pytest.raises(TypeError):
+        secrets.set("TOKEN", cast(Any, non_string_value))
 
 
 def test_empty_value_is_rejected(secrets: Secrets) -> None:
@@ -342,3 +349,79 @@ def test_external_http_client_is_used(api: respx.MockRouter) -> None:
 
     assert not http_client.is_closed
     http_client.close()
+
+
+OTHER_SERVICE_ID = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
+
+def test_explicit_arguments_win_over_the_mapping(api: respx.MockRouter) -> None:
+    route = api.get(ENV_PATH).respond(200, json=listing())
+    environ = {"RUNSITE_API_KEY": "ak_live_from_mapping", "RUNSITE_SERVICE_ID": OTHER_SERVICE_ID}
+
+    with Secrets(api_key=API_KEY, base_url=BASE_URL, service_id=SERVICE_ID, environ=environ) as client:
+        client.list()
+
+    assert route.calls.last.request.headers["Authorization"] == f"Bearer {API_KEY}"
+
+
+def test_set_writes_to_the_given_service(api: respx.MockRouter, secrets: Secrets) -> None:
+    other_env_path = f"/web-services/{OTHER_SERVICE_ID}/env"
+    api.get(other_env_path).respond(200, json=listing())
+    bulk = api.put(f"{other_env_path}/bulk").respond(200, json=bulk_result(created=1))
+
+    assert secrets.set("TOKEN", "value", service_id=OTHER_SERVICE_ID).created == 1
+    assert sent_variables(bulk) == [{"key": "TOKEN", "value": "value", "is_secret": True}]
+
+
+def test_supplied_http_client_carries_the_requests() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json=listing())
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+        Secrets(api_key=API_KEY, base_url=BASE_URL, service_id=SERVICE_ID, http_client=http_client) as client,
+    ):
+        client.list()
+
+    assert seen_paths == [f"/api/v1{ENV_PATH}"]
+
+
+def test_close_closes_the_connection_pool(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
+    api.get(ENV_PATH).respond(200, json=listing())
+    closed_transports: list[SyncTransport] = []
+    original_close = SyncTransport.close
+
+    def recording_close(transport: SyncTransport) -> None:
+        closed_transports.append(transport)
+        original_close(transport)
+
+    monkeypatch.setattr(SyncTransport, "close", recording_close)
+    with Secrets(api_key=API_KEY, base_url=BASE_URL, service_id=SERVICE_ID) as client:
+        client.list()
+
+    assert len(closed_transports) == 1
+
+
+async def test_async_close_closes_the_connection_pool(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
+    api.get(ENV_PATH).respond(200, json=listing())
+    closed_transports: list[AsyncTransport] = []
+    original_aclose = AsyncTransport.aclose
+
+    async def recording_aclose(transport: AsyncTransport) -> None:
+        closed_transports.append(transport)
+        await original_aclose(transport)
+
+    monkeypatch.setattr(AsyncTransport, "aclose", recording_aclose)
+    async with AsyncSecrets(api_key=API_KEY, base_url=BASE_URL, service_id=SERVICE_ID) as client:
+        await client.list()
+
+    assert len(closed_transports) == 1
+
+
+@pytest.mark.parametrize("status", ["stopped", "sleeping", "failed", "running"])
+def test_only_restarting_status_counts_as_restarting(status: str) -> None:
+    assert ApplyResult(status=status).restarting is False
+    assert ApplyResult(status="restarting").restarting is True

@@ -232,7 +232,9 @@ def test_max_retries_zero_disables_retries(api: respx.MockRouter) -> None:
     assert route.call_count == 1
 
 
-@pytest.mark.parametrize(("timeout", "max_retries"), [(0.0, 1), (-1.0, 1), (5.0, -1)])
+@pytest.mark.parametrize(
+    ("timeout", "max_retries"), [(0.0, 1), (-1.0, 1), (float("nan"), 1), (float("inf"), 1), (5.0, -1)]
+)
 def test_invalid_settings_are_rejected(timeout: float, max_retries: int) -> None:
     with pytest.raises(ValueError):
         RequestSettings(

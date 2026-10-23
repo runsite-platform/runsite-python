@@ -13,6 +13,7 @@ NOW = 1_800_000_000
 BODY = json.dumps(
     {"event": "delivered", "email_id": "e1", "recipient": "c@d.com", "service_id": "s1", "provider": "x"}
 ).encode()
+ARABIC_INDIC_NOW = str(NOW).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩"))
 
 
 def sign(body: bytes, timestamp: int | str, secret: str = SECRET) -> str:
@@ -82,7 +83,9 @@ def test_stale_or_future_timestamp_fails(skew: int) -> None:
         verify_webhook(BODY, headers(timestamp=NOW + skew), secret=SECRET, now=NOW)
 
 
-@pytest.mark.parametrize("bad_timestamp", ["yesterday", "", "+1800000000", " 1800000000", "1_800_000_000", "١٨٠٠"])
+@pytest.mark.parametrize(
+    "bad_timestamp", ["yesterday", "", "+1800000000", " 1800000000", "1_800_000_000", "١٨٠٠", ARABIC_INDIC_NOW]
+)
 def test_non_digit_timestamp_fails(bad_timestamp: str) -> None:
     bad = {"X-Runsite-Timestamp": bad_timestamp, "X-Runsite-Signature": sign(BODY, bad_timestamp)}
 
@@ -124,3 +127,17 @@ def test_string_payload_is_accepted() -> None:
 
 def test_available_on_email_client() -> None:
     assert Email.webhooks.verify is verify_webhook
+
+
+@pytest.mark.parametrize("partial_signature", ["", sign(BODY, NOW)[:16], sign(BODY, NOW)[:-1]])
+def test_empty_or_truncated_signature_fails(partial_signature: str) -> None:
+    with pytest.raises(WebhookVerificationError, match="signature"):
+        verify_webhook(BODY, headers(signature=partial_signature), secret=SECRET, now=NOW)
+
+
+def test_signed_body_without_event_fails() -> None:
+    body = json.dumps({"email_id": "e1"}).encode()
+    signed = {"X-Runsite-Timestamp": str(NOW), "X-Runsite-Signature": sign(body, NOW)}
+
+    with pytest.raises(WebhookVerificationError, match="no event"):
+        verify_webhook(body, signed, secret=SECRET, now=NOW)

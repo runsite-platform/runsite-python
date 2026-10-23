@@ -1,12 +1,15 @@
 import json
+import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import cast
 
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
-from runsite._email import AsyncEmail, Email
+from runsite._email import AsyncEmail, Email, EmailRecord
 from runsite._email.client import DEFAULT_EMAIL_TIMEOUT_SECONDS
 from runsite._errors import (
     APITimeoutError,
@@ -15,6 +18,7 @@ from runsite._errors import (
     ServiceUnavailableError,
     UpstreamError,
 )
+from runsite._http import SyncTransport
 from tests.conftest import FakeClock
 from tests.constants import EMAIL_API_KEY, EMAIL_URL
 
@@ -218,3 +222,117 @@ async def test_async_get_rejects_non_uuid_id() -> None:
     async with AsyncEmail(api_key=EMAIL_API_KEY, endpoint=EMAIL_URL) as client:
         with pytest.raises(ValueError, match="UUID"):
             await client.get("../domains")
+
+
+def test_send_maps_text_cc_and_bcc(email_api: respx.MockRouter, email: Email) -> None:
+    route = email_api.post("").respond(200, json=SENT)
+
+    email.send(from_="a@b.com", to="c@d.com", subject="s", text="plain", cc="cc@d.com", bcc=["bcc@d.com"])
+
+    assert json.loads(route.calls.last.request.content) == {
+        "from": "a@b.com",
+        "to": ["c@d.com"],
+        "subject": "s",
+        "text": "plain",
+        "cc": ["cc@d.com"],
+        "bcc": ["bcc@d.com"],
+    }
+
+
+def test_empty_recipient_list_is_rejected_locally(email: Email) -> None:
+    with pytest.raises(ValueError, match="at least one recipient"):
+        email.send(from_="a@b.com", to=[], subject="s", text="t")
+
+
+def test_recipient_limit_counts_cc_and_bcc(email: Email) -> None:
+    def addresses(prefix: str, count: int) -> list[str]:
+        return [f"{prefix}{index}@example.com" for index in range(count)]
+
+    with pytest.raises(ValueError, match="50"):
+        email.send(
+            from_="a@b.com",
+            to=addresses("to", 30),
+            cc=addresses("cc", 15),
+            bcc=addresses("bcc", 6),
+            subject="s",
+            text="t",
+        )
+
+
+def test_get_rejects_non_string_id(email: Email) -> None:
+    with pytest.raises(TypeError, match="string"):
+        email.get(cast(str, uuid.UUID(EMAIL_ID)))
+
+
+def test_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMAIL_API_KEY", EMAIL_API_KEY)
+    monkeypatch.setenv("EMAIL_API_URL", "https://mail.runsite.test/emails")
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://mail.runsite.test/emails").respond(200, json=SENT)
+        with Email() as client:
+            client.send(from_="a@b.com", to="c@d.com", subject="s", text="t")
+    assert route.called
+
+
+def test_supplied_http_client_is_used() -> None:
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json=SENT)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        Email(api_key=EMAIL_API_KEY, endpoint=EMAIL_URL, http_client=http_client).send(
+            from_="a@b.com", to="c@d.com", subject="s", text="t"
+        )
+
+    assert seen_urls == [EMAIL_URL]
+
+
+async def test_async_supplied_http_client_is_used() -> None:
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json=SENT)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await AsyncEmail(api_key=EMAIL_API_KEY, endpoint=EMAIL_URL, http_client=http_client).send(
+            from_="a@b.com", to="c@d.com", subject="s", text="t"
+        )
+
+    assert seen_urls == [EMAIL_URL]
+
+
+def test_context_manager_closes_the_connection_pool(
+    email_api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    email_api.post("").respond(200, json=SENT)
+    closed_transports: list[object] = []
+    original_close = SyncTransport.close
+
+    def recording_close(transport: SyncTransport) -> None:
+        closed_transports.append(transport)
+        original_close(transport)
+
+    monkeypatch.setattr(SyncTransport, "close", recording_close)
+    with Email(api_key=EMAIL_API_KEY, endpoint=EMAIL_URL) as client:
+        client.send(from_="a@b.com", to="c@d.com", subject="s", text="t")
+
+    assert len(closed_transports) == 1
+
+
+async def test_async_send_posts_to_the_endpoint_itself(email_api: respx.MockRouter) -> None:
+    route = email_api.post("").respond(200, json=SENT)
+
+    async with AsyncEmail(api_key=EMAIL_API_KEY, endpoint=EMAIL_URL) as client:
+        await client.send(from_="a@b.com", to="c@d.com", subject="s", text="t")
+
+    assert str(route.calls.last.request.url) == EMAIL_URL
+
+
+def test_email_record_requires_status() -> None:
+    record_without_status = {name: value for name, value in RECORD.items() if name != "status"}
+
+    with pytest.raises(ValidationError, match="status"):
+        EmailRecord.model_validate(record_without_status)

@@ -13,6 +13,7 @@ from runsite._errors import (
 )
 from runsite._http import AsyncTransport
 from tests.conftest import FakeClock
+from tests.constants import API_KEY
 from tests.test_http_sync import make_settings
 
 
@@ -110,3 +111,13 @@ async def test_external_http_client_is_left_open() -> None:
 
     assert not http_client.is_closed
     await http_client.aclose()
+
+
+async def test_sends_auth_and_user_agent(api: respx.MockRouter, transport: AsyncTransport) -> None:
+    route = api.get("/users/me").respond(200, json={"ok": True})
+
+    await transport.request("GET", "/users/me")
+
+    request = route.calls.last.request
+    assert request.headers["Authorization"] == f"Bearer {API_KEY}"
+    assert request.headers["User-Agent"].startswith("runsite-python/")

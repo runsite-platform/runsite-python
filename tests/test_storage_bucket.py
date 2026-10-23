@@ -184,6 +184,13 @@ def test_exists() -> None:
     assert bucket.exists("missing.txt") is False
 
 
+def test_exists_raises_on_access_denied() -> None:
+    bucket, _ = make_bucket(FakeS3Client(error=client_error("AccessDenied", "HeadObject")))
+
+    with pytest.raises(StorageAccessDeniedError):
+        bucket.exists("a.txt")
+
+
 def test_list_follows_continuation_tokens() -> None:
     moment = datetime(2026, 10, 22, tzinfo=timezone.utc)
     pages = [
@@ -199,6 +206,7 @@ def test_list_follows_continuation_tokens() -> None:
     keys = [item.key for item in bucket.list(prefix="a/")]
 
     assert keys == ["a/1", "a/2"]
+    assert [arguments["Prefix"] for _, arguments in fake.calls] == ["a/", "a/"]
     assert fake.calls[1][1]["ContinuationToken"] == "t1"
 
 
@@ -412,11 +420,11 @@ def test_storage_bucket_without_name_or_variable() -> None:
         Storage().bucket()
 
 
-def test_bucket_from_created_key() -> None:
-    key = AccessKey.model_validate(
+def created_key(access_key: str = "AKIA3") -> AccessKey:
+    return AccessKey.model_validate(
         {
             "id": "9a1c2b3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
-            "access_key": "AKIA3",
+            "access_key": access_key,
             "secret_key": "sk-test-value",
             "permissions": {"read": True, "write": True, "delete": True},
             "bucket_id": "5b0f6d2a-3c1e-4f8a-9d7b-2e6c1a4b8f00",
@@ -425,6 +433,20 @@ def test_bucket_from_created_key() -> None:
         }
     )
 
-    bucket = Storage().bucket("avatars", access_key=key)
+
+def test_bucket_from_created_key() -> None:
+    bucket = Storage().bucket("avatars", access_key=created_key())
 
     assert bucket.client.meta.region_name == "eu-central"
+
+
+def test_storage_bucket_is_cached_per_access_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_runsite_variables(monkeypatch)
+    storage = Storage()
+    first_key, second_key = created_key("AKIA3"), created_key("AKIA4")
+
+    with_first_key = storage.bucket("avatars", access_key=first_key)
+
+    assert storage.bucket("avatars", access_key=first_key) is with_first_key
+    assert storage.bucket("avatars", access_key=second_key) is not with_first_key
+    assert storage.bucket("avatars") is not with_first_key
