@@ -9,7 +9,7 @@ from typing import IO, Any, TypeAlias
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
-from runsite._config import read_env, resolve
+from runsite._config import Environment, S3Credentials, resolve_bucket_name, s3_credentials
 from runsite._errors import ConfigurationError, ObjectNotFoundError, StorageAccessDeniedError, StorageError
 from runsite._storage.models import AccessKey, ObjectInfo
 
@@ -26,8 +26,6 @@ NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NoSuchBucket", "NotFound"})
 ACCESS_DENIED_CODES = frozenset({"403", "AccessDenied", "Forbidden"})
 PRESIGN_METHODS = {"GET": "get_object", "PUT": "put_object", "DELETE": "delete_object", "HEAD": "head_object"}
 INSTALL_HINT = 'Object storage needs boto3: pip install "runsite-sdk[storage]"'
-CREDENTIALS_HINT = "Connect a bucket to this web service in the Runsite dashboard, or pass access_key=..."
-BUCKET_HINT = "Pass the bucket name or connect a bucket to this service."
 DELETE_DENIED_HINT = (
     "This key has no delete permission. Keys injected by a dashboard connection are read/write only; "
     "create one with storage.create_key(bucket=..., delete=True) and pass it as access_key=..."
@@ -48,66 +46,52 @@ def _boto3() -> Any:
     return boto3
 
 
-def credentials_from_environment() -> tuple[str, str, str]:
-    """Return (key id, secret, endpoint) from S3_*, or from AWS_* only when AWS_ENDPOINT_URL_S3 is set.
-
-    AWS_* keys are never paired with S3_ENDPOINT_URL, so real AWS credentials are not sent to Runsite.
-    """
-    if read_env("S3_ACCESS_KEY_ID") or not read_env("AWS_ENDPOINT_URL_S3"):
-        return (
-            resolve(None, "S3_ACCESS_KEY_ID", hint=CREDENTIALS_HINT),
-            resolve(None, "S3_SECRET_ACCESS_KEY", hint=CREDENTIALS_HINT),
-            resolve(None, "S3_ENDPOINT_URL", hint=CREDENTIALS_HINT),
-        )
-    return (
-        resolve(None, "AWS_ACCESS_KEY_ID", hint=CREDENTIALS_HINT),
-        resolve(None, "AWS_SECRET_ACCESS_KEY", hint=CREDENTIALS_HINT),
-        resolve(None, "AWS_ENDPOINT_URL_S3", hint=CREDENTIALS_HINT),
+def credentials_for(access_key: AccessKey | None, environment: Environment) -> S3Credentials:
+    """Credentials of a created key, else the ones injected into the environment."""
+    if access_key is None:
+        return s3_credentials(environment)
+    return S3Credentials(
+        key_id=access_key.access_key,
+        secret=access_key.secret_key.reveal(),
+        endpoint_url=access_key.endpoint_url,
+        region=access_key.region,
     )
 
 
-def make_s3_client(*, access_key: AccessKey | None) -> tuple[Any, str]:
-    """Build a boto3 S3 client for Runsite storage and return it with its endpoint URL."""
+def make_s3_client(credentials: S3Credentials) -> Any:
+    """Build a boto3 S3 client for Runsite storage."""
     boto3 = _boto3()
     from botocore.config import Config
 
-    if access_key is not None:
-        key_id, secret, endpoint, region = (
-            access_key.access_key,
-            access_key.secret_key.reveal(),
-            access_key.endpoint_url,
-            access_key.region,
-        )
-    else:
-        key_id, secret, endpoint = credentials_from_environment()
-        region = read_env("S3_REGION") or "auto"
     config = Config(
         signature_version="s3v4",
         s3={"addressing_style": "path"},
         request_checksum_calculation="when_required",
         response_checksum_validation="when_required",
     )
-    client = boto3.client(
+    return boto3.client(
         "s3",
-        endpoint_url=endpoint,
-        region_name=region,
-        aws_access_key_id=key_id,
-        aws_secret_access_key=secret,
+        endpoint_url=credentials.endpoint_url,
+        region_name=credentials.region,
+        aws_access_key_id=credentials.key_id,
+        aws_secret_access_key=credentials.secret,
         config=config,
     )
-    return client, endpoint
 
 
 def cached_bucket(
-    cache: dict[tuple[str, str | None], Bucket], name: str | None, access_key: AccessKey | None
+    cache: dict[tuple[str, str | None], Bucket],
+    name: str | None,
+    access_key: AccessKey | None,
+    environment: Environment,
 ) -> Bucket:
     """Return the cached `Bucket` for this name and key, creating its boto3 client on first use."""
-    bucket_name = resolve(name, "S3_BUCKET", hint=BUCKET_HINT)
-    cache_key = (bucket_name, access_key.access_key if access_key is not None else None)
+    resolved_name = resolve_bucket_name(environment, name)
+    cache_key = (resolved_name, access_key.access_key if access_key is not None else None)
     bucket = cache.get(cache_key)
     if bucket is None:
-        client, endpoint = make_s3_client(access_key=access_key)
-        bucket = Bucket(bucket_name, client=client, endpoint_url=endpoint)
+        credentials = credentials_for(access_key, environment)
+        bucket = Bucket(resolved_name, client=make_s3_client(credentials), endpoint_url=credentials.endpoint_url)
         cache[cache_key] = bucket
     return bucket
 

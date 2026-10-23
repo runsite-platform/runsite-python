@@ -189,6 +189,15 @@ def test_endpoint_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert route.called
 
 
+def test_settings_from_injected_mapping(email_api: respx.MockRouter) -> None:
+    route = email_api.post("").respond(200, json=SENT)
+    environ = {"EMAIL_API_KEY": EMAIL_API_KEY, "EMAIL_API_URL": EMAIL_URL}
+    with Email(environ=environ) as client:
+        client.send(from_="a@b.com", to="c@d.com", subject="s", text="t")
+
+    assert route.calls.last.request.headers["Api-Key"] == EMAIL_API_KEY
+
+
 def test_missing_key_fails_on_first_send() -> None:
     client = Email()
     with pytest.raises(ConfigurationError, match="EMAIL_API_KEY"):

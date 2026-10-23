@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
+from runsite._config import Environment, platform_settings
 from runsite._http import Operation, Request, RequestSettings
-from runsite._platform import platform_settings
 from runsite._storage.bucket import Bucket, cached_bucket
 from runsite._storage.models import AccessKey, AccessKeyInfo, BucketInfo
 
@@ -45,7 +46,16 @@ def key_body(*, bucket_id: str | None, name: str | None, read: bool, write: bool
 class _StorageOperations:
     """Control-plane operations shared by `Storage` and `AsyncStorage`."""
 
-    def __init__(self, *, api_key: str | None, base_url: str | None, timeout: float, max_retries: int) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        base_url: str | None,
+        timeout: float,
+        max_retries: int,
+        environ: Mapping[str, str] | None,
+    ) -> None:
+        self._environment = Environment(environ)
         self._api_key = api_key
         self._base_url = base_url
         self._timeout = timeout
@@ -54,7 +64,11 @@ class _StorageOperations:
 
     def _request_settings(self) -> RequestSettings:
         return platform_settings(
-            api_key=self._api_key, base_url=self._base_url, timeout=self._timeout, max_retries=self._max_retries
+            self._environment,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+            max_retries=self._max_retries,
         )
 
     def bucket(self, name: str | None = None, *, access_key: AccessKey | None = None) -> Bucket:
@@ -62,7 +76,7 @@ class _StorageOperations:
 
         The boto3 client is created once per bucket name and key and reused on later calls.
         """
-        return cached_bucket(self._buckets, name, access_key)
+        return cached_bucket(self._buckets, name, access_key, self._environment)
 
     def _create_bucket(self, name: str, public: bool) -> Operation[BucketInfo]:
         body = {"name": name, "is_public": public}
@@ -104,6 +118,8 @@ class _StorageOperations:
 class Storage(_StorageOperations, SyncClient):
     """Manages buckets and S3 access keys through the Runsite API (needs RUNSITE_API_KEY).
 
+    Settings not passed to the constructor come from `environ=` when given, else from `os.environ`.
+
     Bucket names are global across Runsite: 409 on create can mean another account owns the name.
     Exceeding the plan's bucket quota returns 400 (BadRequestError).
     """
@@ -116,8 +132,11 @@ class Storage(_StorageOperations, SyncClient):
         timeout: float = 30.0,
         max_retries: int = 2,
         http_client: httpx.Client | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
-        _StorageOperations.__init__(self, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+        _StorageOperations.__init__(
+            self, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries, environ=environ
+        )
         SyncClient.__init__(self, http_client=http_client)
 
     def create_bucket(self, name: str, *, public: bool = False) -> BucketInfo:
@@ -177,8 +196,11 @@ class AsyncStorage(_StorageOperations, AsyncClient):
         timeout: float = 30.0,
         max_retries: int = 2,
         http_client: httpx.AsyncClient | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
-        _StorageOperations.__init__(self, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+        _StorageOperations.__init__(
+            self, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries, environ=environ
+        )
         AsyncClient.__init__(self, http_client=http_client)
 
     async def create_bucket(self, name: str, *, public: bool = False) -> BucketInfo:

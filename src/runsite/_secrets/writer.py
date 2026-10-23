@@ -8,10 +8,9 @@ from typing import Any
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._config import DEFAULT_BASE_URL
-from runsite._errors import ConfigurationError, ConflictError
+from runsite._config import Environment, platform_settings, resolve_service_id
+from runsite._errors import ConflictError
 from runsite._http import Operation, Request, RequestSettings
-from runsite._platform import API_KEY_HINT, platform_settings
 from runsite._secrets.models import ApplyResult, BulkResult, EnvVariable
 from runsite._secrets.reader import SecretReader
 
@@ -19,7 +18,6 @@ KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*")
 MAX_KEY_LENGTH = 255
 RESERVED_KEYS = frozenset({"APP_PORT", "APP_NAME", "RUNSITE_SERVICE_ID"})
 VALID_PORTS = range(1, 65536)
-SERVICE_ID_HINT = "It is set automatically inside Runsite containers; elsewhere pass service_id=..."
 
 
 def _is_valid_port(value: str) -> bool:
@@ -88,42 +86,38 @@ def delete_body(keys: Iterable[str], existing: Mapping[str, EnvVariable]) -> dic
     return {"variables": [{"id": existing[key].id, "key": key, "deleted": True} for key in keys if key in existing]}
 
 
-class _WriterConfig:
-    def __init__(
-        self, *, api_key: str | None, base_url: str | None, service_id: str | None, timeout: float, max_retries: int
-    ) -> None:
-        self.api_key = api_key
-        self.base_url = base_url
-        self.service_id = service_id
-        self.timeout = timeout
-        self.max_retries = max_retries
-
-    def target(self, service_id: str | None, source: Mapping[str, str]) -> str:
-        resolved = service_id or self.service_id or source.get("RUNSITE_SERVICE_ID")
-        if not resolved:
-            raise ConfigurationError(f"RUNSITE_SERVICE_ID is not set. {SERVICE_ID_HINT}")
-        return resolved
-
-    def settings(self, source: Mapping[str, str]) -> RequestSettings:
-        api_key = self.api_key or source.get("RUNSITE_API_KEY")
-        if not api_key:
-            raise ConfigurationError(f"RUNSITE_API_KEY is not set. {API_KEY_HINT}")
-        base_url = self.base_url or source.get("RUNSITE_BASE_URL") or DEFAULT_BASE_URL
-        return platform_settings(api_key=api_key, base_url=base_url, timeout=self.timeout, max_retries=self.max_retries)
-
-
 class _SecretsOperations(SecretReader):
     """The writer operations, shared by `Secrets` and `AsyncSecrets`."""
 
-    def __init__(self, config: _WriterConfig, environ: Mapping[str, str] | None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        base_url: str | None,
+        service_id: str | None,
+        timeout: float,
+        max_retries: int,
+        environ: Mapping[str, str] | None,
+    ) -> None:
         SecretReader.__init__(self, environ=environ)
-        self._config = config
+        self._environment = Environment(environ)
+        self._api_key = api_key
+        self._base_url = base_url
+        self._service_id = service_id
+        self._timeout = timeout
+        self._max_retries = max_retries
 
     def _request_settings(self) -> RequestSettings:
-        return self._config.settings(self._source())
+        return platform_settings(
+            self._environment,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+            max_retries=self._max_retries,
+        )
 
-    def _target(self, service_id: str | None) -> str:
-        return self._config.target(service_id, self._source())
+    def _target(self, call_service_id: str | None) -> str:
+        return resolve_service_id(self._environment, call_service_id, self._service_id)
 
     def _list(self, service_id: str | None) -> Operation[builtins.list[EnvVariable]]:
         return parse_variables((yield Request("GET", env_path(self._target(service_id)))))
@@ -183,10 +177,15 @@ class Secrets(_SecretsOperations, SyncClient):
         http_client: httpx.Client | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        config = _WriterConfig(
-            api_key=api_key, base_url=base_url, service_id=service_id, timeout=timeout, max_retries=max_retries
+        _SecretsOperations.__init__(
+            self,
+            api_key=api_key,
+            base_url=base_url,
+            service_id=service_id,
+            timeout=timeout,
+            max_retries=max_retries,
+            environ=environ,
         )
-        _SecretsOperations.__init__(self, config, environ)
         SyncClient.__init__(self, http_client=http_client)
 
     def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:
@@ -241,10 +240,15 @@ class AsyncSecrets(_SecretsOperations, AsyncClient):
         http_client: httpx.AsyncClient | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        config = _WriterConfig(
-            api_key=api_key, base_url=base_url, service_id=service_id, timeout=timeout, max_retries=max_retries
+        _SecretsOperations.__init__(
+            self,
+            api_key=api_key,
+            base_url=base_url,
+            service_id=service_id,
+            timeout=timeout,
+            max_retries=max_retries,
+            environ=environ,
         )
-        _SecretsOperations.__init__(self, config, environ)
         AsyncClient.__init__(self, http_client=http_client)
 
     async def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:

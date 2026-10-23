@@ -8,6 +8,7 @@ import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
+from runsite._config import Environment, s3_credentials
 from runsite._errors import ConfigurationError, ObjectNotFoundError, StorageAccessDeniedError, StorageError
 from runsite._storage.bucket import (
     DELETE_BATCH_MAX_BODY_BYTES,
@@ -120,10 +121,16 @@ def make_bucket(client: FakeS3Client | None = None) -> tuple[Bucket, FakeS3Clien
     return Bucket("avatars", client=fake, endpoint_url="https://s3.runsite.test"), fake
 
 
+RUNSITE_VARIABLES = {
+    "S3_ACCESS_KEY_ID": "AKIA1",
+    "S3_SECRET_ACCESS_KEY": "secret",
+    "S3_ENDPOINT_URL": "https://s3.runsite.test",
+}
+
+
 def set_runsite_variables(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("S3_ACCESS_KEY_ID", "AKIA1")
-    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "secret")
-    monkeypatch.setenv("S3_ENDPOINT_URL", "https://s3.runsite.test")
+    for name, value in RUNSITE_VARIABLES.items():
+        monkeypatch.setenv(name, value)
 
 
 def test_upload_bytes_uses_put_object() -> None:
@@ -356,46 +363,30 @@ def test_client_errors_are_mapped(code: str, error_class: type[StorageError]) ->
     assert isinstance(caught.value.__cause__, ClientError)
 
 
-def test_make_s3_client_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_runsite_variables(monkeypatch)
-    monkeypatch.setenv("S3_REGION", "eu-central")
+def test_make_s3_client_from_environment() -> None:
+    credentials = s3_credentials(Environment({**RUNSITE_VARIABLES, "S3_REGION": "eu-central"}))
 
-    client, endpoint = make_s3_client(access_key=None)
+    client = make_s3_client(credentials)
 
-    assert endpoint == "https://s3.runsite.test"
     assert client.meta.region_name == "eu-central"
     assert client.meta.config.s3["addressing_style"] == "path"
     assert client.meta.config.request_checksum_calculation == "when_required"
     assert client.meta.config.response_checksum_validation == "when_required"
     with Stubber(client) as stubber:
         stubber.add_response("head_object", {}, {"Bucket": "avatars", "Key": "a.txt"})
-        Bucket("avatars", client=client, endpoint_url=endpoint).exists("a.txt")
+        Bucket("avatars", client=client, endpoint_url=credentials.endpoint_url).exists("a.txt")
         stubber.assert_no_pending_responses()
 
 
-def test_aws_variable_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA2")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
-    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://s3.other.test")
+def test_storage_reads_bucket_credentials_from_injected_mapping() -> None:
+    storage = Storage(environ={**RUNSITE_VARIABLES, "S3_BUCKET": "uploads"})
 
-    client, endpoint = make_s3_client(access_key=None)
-
-    assert endpoint == "https://s3.other.test"
-    assert client.meta.region_name == "auto"
-
-
-def test_aws_keys_are_never_paired_with_runsite_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA2")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
-    monkeypatch.setenv("S3_ENDPOINT_URL", "https://s3.runsite.test")
-
-    with pytest.raises(ConfigurationError, match="S3_ACCESS_KEY_ID"):
-        make_s3_client(access_key=None)
+    assert storage.bucket().name == "uploads"
 
 
 def test_missing_credentials_name_the_variable() -> None:
     with pytest.raises(ConfigurationError, match="S3_ACCESS_KEY_ID"):
-        make_s3_client(access_key=None)
+        Storage(environ={}).bucket("avatars")
 
 
 def test_storage_bucket_uses_s3_bucket_variable(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,15 +7,13 @@ from typing import Any, TypeAlias
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._config import DEFAULT_EMAIL_URL, read_env, resolve
+from runsite._config import Environment, email_settings
 from runsite._email.models import EmailRecord, SentEmail
 from runsite._email.webhooks import Webhooks
-from runsite._errors import email_error_from_response
 from runsite._http import Operation, Request, RequestSettings
 
 MAX_RECIPIENTS = 50
 DEFAULT_EMAIL_TIMEOUT_SECONDS = 60.0
-EMAIL_KEY_HINT = "Connect an email service to this web service in the Runsite dashboard, or pass api_key=..."
 Recipients: TypeAlias = "str | Sequence[str]"
 
 
@@ -68,24 +66,21 @@ def email_path(email_id: str) -> str:
     return f"/{normalized_id}"
 
 
-def email_settings(*, api_key: str | None, endpoint: str | None, timeout: float, max_retries: int) -> RequestSettings:
-    key = resolve(api_key, "EMAIL_API_KEY", hint=EMAIL_KEY_HINT)
-    url = endpoint or read_env("EMAIL_API_URL") or DEFAULT_EMAIL_URL
-    return RequestSettings(
-        base_url=url,
-        headers={"Api-Key": key},
-        timeout=timeout,
-        max_retries=max_retries,
-        error_factory=email_error_from_response,
-    )
-
-
 class _EmailOperations:
     """Operations shared by `Email` and `AsyncEmail`."""
 
     webhooks = Webhooks()
 
-    def __init__(self, *, api_key: str | None, endpoint: str | None, timeout: float, max_retries: int) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        endpoint: str | None,
+        timeout: float,
+        max_retries: int,
+        environ: Mapping[str, str] | None,
+    ) -> None:
+        self._environment = Environment(environ)
         self._api_key = api_key
         self._endpoint = endpoint
         self._timeout = timeout
@@ -93,7 +88,11 @@ class _EmailOperations:
 
     def _request_settings(self) -> RequestSettings:
         return email_settings(
-            api_key=self._api_key, endpoint=self._endpoint, timeout=self._timeout, max_retries=self._max_retries
+            self._environment,
+            api_key=self._api_key,
+            endpoint=self._endpoint,
+            timeout=self._timeout,
+            max_retries=self._max_retries,
         )
 
     def _send(self, body: dict[str, Any]) -> Operation[SentEmail]:
@@ -133,8 +132,11 @@ class Email(_EmailOperations, SyncClient):
         timeout: float = DEFAULT_EMAIL_TIMEOUT_SECONDS,
         max_retries: int = 2,
         http_client: httpx.Client | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
-        _EmailOperations.__init__(self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries)
+        _EmailOperations.__init__(
+            self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries, environ=environ
+        )
         SyncClient.__init__(self, http_client=http_client)
 
     def send(
@@ -184,8 +186,11 @@ class AsyncEmail(_EmailOperations, AsyncClient):
         timeout: float = DEFAULT_EMAIL_TIMEOUT_SECONDS,
         max_retries: int = 2,
         http_client: httpx.AsyncClient | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
-        _EmailOperations.__init__(self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries)
+        _EmailOperations.__init__(
+            self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries, environ=environ
+        )
         AsyncClient.__init__(self, http_client=http_client)
 
     async def send(

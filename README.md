@@ -112,6 +112,8 @@ async with AsyncEmail(api_key="...") as email:
 
 Calls that use `RUNSITE_API_KEY` act on the active workspace of the key's owner. Every client
 also accepts its settings as constructor arguments, which win over the environment.
+To read variables from a mapping instead of `os.environ` (handy in tests), pass `environ={...}`
+to any client.
 
 ## Email
 
