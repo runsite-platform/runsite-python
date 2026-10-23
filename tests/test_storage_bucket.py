@@ -1,4 +1,5 @@
 import io
+import threading
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from botocore.stub import Stubber
 
 from runsite._config import Environment, s3_credentials
 from runsite._errors import ConfigurationError, ObjectNotFoundError, StorageAccessDeniedError, StorageError
+from runsite._storage.async_bucket import AsyncBucket
 from runsite._storage.bucket import (
     DELETE_BATCH_MAX_BODY_BYTES,
     MAX_PRESIGN_SECONDS,
@@ -17,7 +19,7 @@ from runsite._storage.bucket import (
     Bucket,
     make_s3_client,
 )
-from runsite._storage.control import Storage
+from runsite._storage.control import AsyncStorage, Storage
 from runsite._storage.models import AccessKey
 
 AWS_VARIABLES = (
@@ -324,9 +326,10 @@ def test_presigned_url_is_capped_with_warning() -> None:
 def test_short_presigned_url_warns_that_it_is_not_enforced() -> None:
     bucket, fake = make_bucket()
 
-    with pytest.warns(UserWarning, match="not enforced"):
+    with pytest.warns(UserWarning, match="not enforced") as caught:
         bucket.presigned_url("a.txt", method="PUT", expires=60)
 
+    assert caught[0].filename == __file__
     assert fake.calls[0][1]["method"] == "put_object"
     assert fake.calls[0][1]["expires"] == 60
 
@@ -441,3 +444,120 @@ def test_storage_bucket_is_cached_per_access_key(monkeypatch: pytest.MonkeyPatch
     assert storage.bucket("avatars", access_key=first_key) is with_first_key
     assert storage.bucket("avatars", access_key=second_key) is not with_first_key
     assert storage.bucket("avatars") is not with_first_key
+
+
+def make_async_bucket(client: FakeS3Client | None = None) -> tuple[AsyncBucket, FakeS3Client]:
+    bucket, fake = make_bucket(client)
+    return AsyncBucket(bucket), fake
+
+
+async def test_async_bucket_upload_download_and_exists() -> None:
+    bucket, fake = make_async_bucket()
+
+    await bucket.upload("b.txt", b"data", content_type="text/plain")
+    assert fake.calls[-1] == (
+        "put_object",
+        {"Bucket": "avatars", "Key": "b.txt", "Body": b"data", "ContentType": "text/plain"},
+    )
+    assert await bucket.download("a.txt") == b"hello"
+    assert await bucket.exists("a.txt") is True
+    assert await bucket.exists("missing.txt") is False
+
+
+async def test_async_bucket_runs_calls_off_the_event_loop_thread() -> None:
+    loop_thread = threading.get_ident()
+    seen_threads: list[int] = []
+
+    class ThreadRecordingClient(FakeS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            seen_threads.append(threading.get_ident())
+            return super().head_object(**kwargs)
+
+    bucket, _ = make_async_bucket(ThreadRecordingClient())
+
+    await bucket.exists("a.txt")
+
+    assert seen_threads and seen_threads[0] != loop_thread
+
+
+async def test_async_bucket_streams_an_object() -> None:
+    bucket, _ = make_async_bucket()
+
+    stream = await bucket.open("a.txt")
+
+    assert await stream.read() == b"hello"
+
+
+async def test_async_bucket_iterates_chunks() -> None:
+    fake = FakeS3Client()
+    fake.objects["big.bin"] = b"abcdefgh"
+
+    class ChunkedBody:
+        def __init__(self, data: bytes) -> None:
+            self._stream = io.BytesIO(data)
+
+        def read(self, amount: int | None = None) -> bytes:
+            return self._stream.read(amount)
+
+    fake.get_object = lambda **kwargs: {"Body": ChunkedBody(fake.objects[kwargs["Key"]])}  # type: ignore[method-assign]
+    bucket, _ = make_async_bucket(fake)
+
+    stream = await bucket.open("big.bin")
+
+    assert [chunk async for chunk in stream.iter_chunks(3)] == [b"abc", b"def", b"gh"]
+
+
+async def test_async_bucket_list_follows_pages() -> None:
+    pages = [
+        {"Contents": [{"Key": "a"}, {"Key": "b"}], "IsTruncated": True, "NextContinuationToken": "t1"},
+        {"Contents": [{"Key": "c"}], "IsTruncated": False},
+    ]
+    bucket, _ = make_async_bucket(FakeS3Client(list_pages=pages))
+
+    assert [item.key async for item in bucket.list("")] == ["a", "b", "c"]
+
+
+async def test_async_bucket_maps_errors_like_the_sync_bucket() -> None:
+    bucket, _ = make_async_bucket(FakeS3Client(error=client_error("NoSuchKey")))
+
+    with pytest.raises(ObjectNotFoundError):
+        await bucket.download("a.txt")
+
+
+async def test_async_bucket_delete_copy_and_delete_many() -> None:
+    bucket, fake = make_async_bucket()
+
+    await bucket.delete("a.txt")
+    await bucket.copy("a.txt", "b.txt")
+    await bucket.delete_many(["x", "y"])
+
+    assert [name for name, _ in fake.calls] == ["delete_object", "copy_object", "delete_objects"]
+
+
+async def test_async_bucket_download_to(tmp_path: Path) -> None:
+    bucket, _ = make_async_bucket()
+    target = tmp_path / "a.txt"
+
+    await bucket.download_to("a.txt", target)
+
+    assert target.read_bytes() == b"hello"
+
+
+def test_async_presigned_url_warning_points_at_the_caller() -> None:
+    bucket, _ = make_async_bucket()
+
+    with pytest.warns(UserWarning, match="not enforced") as caught:
+        bucket.presigned_url("a.txt", expires=60)
+
+    assert caught[0].filename == __file__
+
+
+def test_async_storage_bucket_is_an_async_bucket_cached_per_name() -> None:
+    storage = AsyncStorage(environ={**RUNSITE_VARIABLES, "S3_BUCKET": "uploads"})
+
+    bucket = storage.bucket()
+
+    assert isinstance(bucket, AsyncBucket)
+    assert bucket.name == "uploads"
+    assert storage.bucket("uploads") is bucket
+    assert bucket.public_url("x") == "https://s3.runsite.test/uploads/x"

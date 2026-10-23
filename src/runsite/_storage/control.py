@@ -10,6 +10,7 @@ import httpx
 from runsite._client import AsyncClient, SyncClient
 from runsite._config import Environment, platform_settings
 from runsite._http import Operation, Request, RequestSettings
+from runsite._storage.async_bucket import AsyncBucket
 from runsite._storage.bucket import Bucket, cached_bucket
 from runsite._storage.models import AccessKey, AccessKeyInfo, BucketInfo
 
@@ -71,11 +72,7 @@ class _StorageOperations:
             max_retries=self._max_retries,
         )
 
-    def bucket(self, name: str | None = None, *, access_key: AccessKey | None = None) -> Bucket:
-        """Data-plane client for a bucket. Defaults to S3_BUCKET and the injected S3_* credentials.
-
-        The boto3 client is created once per bucket name and key and reused on later calls.
-        """
+    def _bucket(self, name: str | None, access_key: AccessKey | None) -> Bucket:
         return cached_bucket(self._buckets, name, access_key, self._environment)
 
     def _create_bucket(self, name: str, public: bool) -> Operation[BucketInfo]:
@@ -139,6 +136,13 @@ class Storage(_StorageOperations, SyncClient):
         )
         SyncClient.__init__(self, http_client=http_client)
 
+    def bucket(self, name: str | None = None, *, access_key: AccessKey | None = None) -> Bucket:
+        """Data-plane client for a bucket. Defaults to S3_BUCKET and the injected S3_* credentials.
+
+        The boto3 client is created once per bucket name and key and reused on later calls.
+        """
+        return self._bucket(name, access_key)
+
     def create_bucket(self, name: str, *, public: bool = False) -> BucketInfo:
         """Create a bucket (needs a write-scope API key). Names are 3-63 characters and globally unique."""
         return self._run(self._create_bucket(name, public))
@@ -186,7 +190,7 @@ class Storage(_StorageOperations, SyncClient):
 
 
 class AsyncStorage(_StorageOperations, AsyncClient):
-    """Async twin of `Storage`'s control-plane methods; the docstrings on `Storage` apply here too."""
+    """Async twin of `Storage`; the docstrings on `Storage` apply here too. `bucket()` returns an `AsyncBucket`."""
 
     def __init__(
         self,
@@ -202,6 +206,15 @@ class AsyncStorage(_StorageOperations, AsyncClient):
             self, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries, environ=environ
         )
         AsyncClient.__init__(self, http_client=http_client)
+        self._async_buckets: dict[int, AsyncBucket] = {}
+
+    def bucket(self, name: str | None = None, *, access_key: AccessKey | None = None) -> AsyncBucket:
+        """Async data-plane client for a bucket; see `Storage.bucket`. Its calls run in worker threads."""
+        bucket = self._bucket(name, access_key)
+        async_bucket = self._async_buckets.get(id(bucket))
+        if async_bucket is None:
+            async_bucket = self._async_buckets[id(bucket)] = AsyncBucket(bucket)
+        return async_bucket
 
     async def create_bucket(self, name: str, *, public: bool = False) -> BucketInfo:
         return await self._run(self._create_bucket(name, public))

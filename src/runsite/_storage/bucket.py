@@ -267,6 +267,10 @@ class Bucket:
         Runsite does not enforce `expires`: every presigned URL works for about 15 minutes after signing.
         Values above 900 are capped and values below 900 trigger a warning; both are UserWarning.
         """
+        return self._sign(key, method, expires, warning_stacklevel=3)
+
+    def _sign(self, key: str, method: str, expires: int, *, warning_stacklevel: int) -> str:
+        """Presign `key`; `warning_stacklevel` points warnings at the caller of the public method."""
         operation = PRESIGN_METHODS.get(method.upper())
         if operation is None:
             raise ValueError(f"method must be one of {sorted(PRESIGN_METHODS)}")
@@ -275,13 +279,13 @@ class Bucket:
         if expires > MAX_PRESIGN_SECONDS:
             warnings.warn(
                 f"Runsite presigned URLs are valid for at most {MAX_PRESIGN_SECONDS} seconds; expires was capped",
-                stacklevel=2,
+                stacklevel=warning_stacklevel,
             )
             expires = MAX_PRESIGN_SECONDS
         elif expires < MAX_PRESIGN_SECONDS:
             warnings.warn(
                 f"expires={expires} is not enforced by Runsite; the URL works for about {MAX_PRESIGN_SECONDS} seconds",
-                stacklevel=2,
+                stacklevel=warning_stacklevel,
             )
         try:
             url: str = self.client.generate_presigned_url(

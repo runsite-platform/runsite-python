@@ -288,8 +288,9 @@ storage.delete_bucket("shop-avatars", confirm="shop-avatars")
   waits at least 120 seconds.
 - Bucket names are global: a 409 on `create_bucket` can mean another account owns the name.
   Reaching the plan's bucket quota returns 400.
-- `AsyncStorage` has the same bucket and key methods with `await`; `bucket()` stays synchronous,
-  because boto3 is.
+- `AsyncStorage` has the same bucket and key methods with `await`. Its `bucket()` returns an
+  `AsyncBucket` with the same file methods; they run boto3 in a worker thread, so the event loop
+  never blocks. `presigned_url` and `public_url` stay synchronous, and `.sync` gives the plain `Bucket`.
 - Current limits: no browser CORS yet. If you build your own boto3 client against Runsite, set
   `request_checksum_calculation` and `response_checksum_validation` to `"when_required"`, as the
   SDK does.
