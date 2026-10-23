@@ -1,7 +1,5 @@
-"""Official Python SDK for Runsite (https://runsite.app).
+"""Official Python SDK for Runsite (https://runsite.app)."""
 
-This release is a placeholder that reserves the package name.
-The first usable version is in development.
-"""
+from runsite._version import __version__
 
-__version__ = "0.0.1"
+__all__ = ["__version__"]
