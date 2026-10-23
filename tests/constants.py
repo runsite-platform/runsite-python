@@ -1,0 +1,6 @@
+API_KEY = "ak_live_test"
+BASE_URL = "https://api.runsite.test"
+API_URL = f"{BASE_URL}/api/v1"
+EMAIL_API_KEY = "rs_eml_test"
+EMAIL_URL = f"{BASE_URL}/emails"
+SERVICE_ID = "3f1c2a9e-5b7d-4e21-9c0a-7d2b8e4f6a10"
