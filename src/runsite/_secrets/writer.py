@@ -3,14 +3,14 @@ from __future__ import annotations
 import builtins
 import re
 from collections.abc import Iterable, Mapping
-from types import TracebackType
 from typing import Any
 
 import httpx
 
+from runsite._client import AsyncClient, SyncClient
 from runsite._config import DEFAULT_BASE_URL
 from runsite._errors import ConfigurationError, ConflictError
-from runsite._http import AsyncTransport, RequestSettings, SyncTransport
+from runsite._http import Operation, Request, RequestSettings
 from runsite._platform import API_KEY_HINT, platform_settings
 from runsite._secrets.models import ApplyResult, BulkResult, EnvVariable
 from runsite._secrets.reader import SecretReader
@@ -79,6 +79,11 @@ def upsert_body(values: Mapping[str, str], existing: Mapping[str, EnvVariable], 
     return {"variables": items}
 
 
+def validate_variables(values: Mapping[str, object]) -> None:
+    for key, value in values.items():
+        validate_variable(key, value)
+
+
 def delete_body(keys: Iterable[str], existing: Mapping[str, EnvVariable]) -> dict[str, Any]:
     return {"variables": [{"id": existing[key].id, "key": key, "deleted": True} for key in keys if key in existing]}
 
@@ -107,7 +112,52 @@ class _WriterConfig:
         return platform_settings(api_key=api_key, base_url=base_url, timeout=self.timeout, max_retries=self.max_retries)
 
 
-class Secrets(SecretReader):
+class _SecretsOperations(SecretReader):
+    """The writer operations, shared by `Secrets` and `AsyncSecrets`."""
+
+    def __init__(self, config: _WriterConfig, environ: Mapping[str, str] | None) -> None:
+        SecretReader.__init__(self, environ=environ)
+        self._config = config
+
+    def _request_settings(self) -> RequestSettings:
+        return self._config.settings(self._source())
+
+    def _target(self, service_id: str | None) -> str:
+        return self._config.target(service_id, self._source())
+
+    def _list(self, service_id: str | None) -> Operation[builtins.list[EnvVariable]]:
+        return parse_variables((yield Request("GET", env_path(self._target(service_id)))))
+
+    def _set_many(
+        self, values: Mapping[str, str], secret: bool | None, service_id: str | None
+    ) -> Operation[BulkResult]:
+        validate_variables(values)
+        if not values:
+            return BulkResult()
+        target = self._target(service_id)
+        try:
+            return (yield from _upsert(target, values, secret))
+        except ConflictError:
+            return (yield from _upsert(target, values, secret))
+
+    def _delete(self, keys: tuple[str, ...], service_id: str | None) -> Operation[BulkResult]:
+        target = self._target(service_id)
+        body = delete_body(keys, variables_by_key((yield Request("GET", env_path(target)))))
+        if not body["variables"]:
+            return BulkResult()
+        return BulkResult.model_validate((yield Request("PUT", bulk_path(target), json=body)))
+
+    def _apply(self, service_id: str | None) -> Operation[ApplyResult]:
+        return ApplyResult.model_validate((yield Request("POST", apply_path(self._target(service_id)))))
+
+
+def _upsert(target: str, values: Mapping[str, str], secret: bool | None) -> Operation[BulkResult]:
+    existing = variables_by_key((yield Request("GET", env_path(target))))
+    response = yield Request("PUT", bulk_path(target), json=upsert_body(values, existing, secret))
+    return BulkResult.model_validate(response)
+
+
+class Secrets(_SecretsOperations, SyncClient):
     """Reads variables from the environment and writes them to a Runsite web service.
 
     The service id, API key and base URL come from the constructor arguments, else from the same mapping
@@ -133,24 +183,15 @@ class Secrets(SecretReader):
         http_client: httpx.Client | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        super().__init__(environ=environ)
-        self._config = _WriterConfig(
+        config = _WriterConfig(
             api_key=api_key, base_url=base_url, service_id=service_id, timeout=timeout, max_retries=max_retries
         )
-        self._http_client = http_client
-        self._transport: SyncTransport | None = None
-
-    def _client(self) -> SyncTransport:
-        if self._transport is None:
-            self._transport = SyncTransport(self._config.settings(self._source()), http_client=self._http_client)
-        return self._transport
-
-    def _target(self, service_id: str | None) -> str:
-        return self._config.target(service_id, self._source())
+        _SecretsOperations.__init__(self, config, environ)
+        SyncClient.__init__(self, http_client=http_client)
 
     def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:
         """List the service's variables: keys and flags only, values are never returned."""
-        return parse_variables(self._client().request("GET", env_path(self._target(service_id))))
+        return self._run(self._list(service_id))
 
     def set(self, key: str, value: str, *, secret: bool | None = None, service_id: str | None = None) -> BulkResult:
         """Create or update one variable; see `set_many` for the `secret` flag."""
@@ -166,30 +207,11 @@ class Secrets(SecretReader):
         (`ValueError`, or `TypeError` for a non-str value). If another writer creates one of the keys at the
         same moment, the read-and-write is repeated once; a second conflict raises `ConflictError`.
         """
-        for key, value in values.items():
-            validate_variable(key, value)
-        if not values:
-            return BulkResult()
-        target = self._target(service_id)
-        try:
-            return self._upsert(target, values, secret)
-        except ConflictError:
-            return self._upsert(target, values, secret)
-
-    def _upsert(self, target: str, values: Mapping[str, str], secret: bool | None) -> BulkResult:
-        client = self._client()
-        existing = variables_by_key(client.request("GET", env_path(target)))
-        response = client.request("PUT", bulk_path(target), json=upsert_body(values, existing, secret))
-        return BulkResult.model_validate(response)
+        return self._run(self._set_many(values, secret, service_id))
 
     def delete(self, *keys: str, service_id: str | None = None) -> BulkResult:
         """Delete variables by key; keys that do not exist are ignored."""
-        target = self._target(service_id)
-        client = self._client()
-        body = delete_body(keys, variables_by_key(client.request("GET", env_path(target))))
-        if not body["variables"]:
-            return BulkResult()
-        return BulkResult.model_validate(client.request("PUT", bulk_path(target), json=body))
+        return self._run(self._delete(keys, service_id))
 
     def apply(self, *, service_id: str | None = None) -> ApplyResult:
         """Push the stored variables to the service with a rolling restart (no rebuild).
@@ -202,23 +224,10 @@ class Secrets(SecretReader):
         deploy is in progress, `BadRequestError` (400) when the service is blocked or out of traffic, and an
         `InternalServerError` subclass (503) when the restart could not be queued; retry it later.
         """
-        return ApplyResult.model_validate(self._client().request("POST", apply_path(self._target(service_id))))
-
-    def close(self) -> None:
-        if self._transport is not None:
-            self._transport.close()
-            self._transport = None
-
-    def __enter__(self) -> Secrets:
-        return self
-
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
-    ) -> None:
-        self.close()
+        return self._run(self._apply(service_id))
 
 
-class AsyncSecrets(SecretReader):
+class AsyncSecrets(_SecretsOperations, AsyncClient):
     """Async twin of `Secrets` with the same configuration, permissions and semantics; reads stay synchronous."""
 
     def __init__(
@@ -232,24 +241,15 @@ class AsyncSecrets(SecretReader):
         http_client: httpx.AsyncClient | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        super().__init__(environ=environ)
-        self._config = _WriterConfig(
+        config = _WriterConfig(
             api_key=api_key, base_url=base_url, service_id=service_id, timeout=timeout, max_retries=max_retries
         )
-        self._http_client = http_client
-        self._transport: AsyncTransport | None = None
-
-    def _client(self) -> AsyncTransport:
-        if self._transport is None:
-            self._transport = AsyncTransport(self._config.settings(self._source()), http_client=self._http_client)
-        return self._transport
-
-    def _target(self, service_id: str | None) -> str:
-        return self._config.target(service_id, self._source())
+        _SecretsOperations.__init__(self, config, environ)
+        AsyncClient.__init__(self, http_client=http_client)
 
     async def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:
         """See `Secrets.list`."""
-        return parse_variables(await self._client().request("GET", env_path(self._target(service_id))))
+        return await self._run(self._list(service_id))
 
     async def set(
         self, key: str, value: str, *, secret: bool | None = None, service_id: str | None = None
@@ -261,45 +261,12 @@ class AsyncSecrets(SecretReader):
         self, values: Mapping[str, str], *, secret: bool | None = None, service_id: str | None = None
     ) -> BulkResult:
         """See `Secrets.set_many`."""
-        for key, value in values.items():
-            validate_variable(key, value)
-        if not values:
-            return BulkResult()
-        target = self._target(service_id)
-        try:
-            return await self._upsert(target, values, secret)
-        except ConflictError:
-            return await self._upsert(target, values, secret)
-
-    async def _upsert(self, target: str, values: Mapping[str, str], secret: bool | None) -> BulkResult:
-        client = self._client()
-        existing = variables_by_key(await client.request("GET", env_path(target)))
-        response = await client.request("PUT", bulk_path(target), json=upsert_body(values, existing, secret))
-        return BulkResult.model_validate(response)
+        return await self._run(self._set_many(values, secret, service_id))
 
     async def delete(self, *keys: str, service_id: str | None = None) -> BulkResult:
         """See `Secrets.delete`."""
-        target = self._target(service_id)
-        client = self._client()
-        body = delete_body(keys, variables_by_key(await client.request("GET", env_path(target))))
-        if not body["variables"]:
-            return BulkResult()
-        return BulkResult.model_validate(await client.request("PUT", bulk_path(target), json=body))
+        return await self._run(self._delete(keys, service_id))
 
     async def apply(self, *, service_id: str | None = None) -> ApplyResult:
         """See `Secrets.apply`."""
-        response = await self._client().request("POST", apply_path(self._target(service_id)))
-        return ApplyResult.model_validate(response)
-
-    async def aclose(self) -> None:
-        if self._transport is not None:
-            await self._transport.aclose()
-            self._transport = None
-
-    async def __aenter__(self) -> AsyncSecrets:
-        return self
-
-    async def __aexit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
-    ) -> None:
-        await self.aclose()
+        return await self._run(self._apply(service_id))

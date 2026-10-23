@@ -30,7 +30,7 @@ def make_settings(max_retries: int = 2) -> RequestSettings:
 
 @pytest.fixture
 def transport() -> Iterator[SyncTransport]:
-    sync_transport = SyncTransport(make_settings())
+    sync_transport = SyncTransport(make_settings)
     yield sync_transport
     sync_transport.close()
 
@@ -225,7 +225,7 @@ def test_invalid_url_is_a_configuration_error(api: respx.MockRouter, transport: 
 
 def test_max_retries_zero_disables_retries(api: respx.MockRouter) -> None:
     route = api.get("/thing").mock(side_effect=[httpx.Response(503)])
-    no_retry_transport = SyncTransport(make_settings(max_retries=0))
+    no_retry_transport = SyncTransport(lambda: make_settings(max_retries=0))
 
     with pytest.raises(ServiceUnavailableError):
         no_retry_transport.request("GET", "/thing")
@@ -248,7 +248,7 @@ def test_invalid_settings_are_rejected(timeout: float, max_retries: int) -> None
 
 def test_external_http_client_is_left_open() -> None:
     http_client = httpx.Client()
-    SyncTransport(make_settings(), http_client=http_client).close()
+    SyncTransport(make_settings, http_client=http_client).close()
 
     assert not http_client.is_closed
     http_client.close()

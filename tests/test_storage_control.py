@@ -6,7 +6,6 @@ import pytest
 import respx
 
 from runsite._errors import ConflictError, PermissionDeniedError
-from runsite._http import AsyncTransport, SyncTransport
 from runsite._storage.control import DELETE_BUCKET_TIMEOUT_SECONDS, AsyncStorage, Storage
 from runsite._storage.models import BucketInfo
 from tests.constants import API_KEY, BASE_URL
@@ -198,43 +197,34 @@ def test_list_keys_sends_page_and_size(api: respx.MockRouter, storage: Storage) 
     assert dict(route.calls.last.request.url.params) == {"page": "3", "size": "10"}
 
 
-def test_close_closes_both_connection_pools(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
-    api.get("/storage/buckets").respond(200, json={"buckets": [], "total": 0})
-    api.delete("/storage/buckets/avatars").respond(204)
-    closed_transports: list[SyncTransport] = []
-    original_close = SyncTransport.close
-
-    def recording_close(transport: SyncTransport) -> None:
-        closed_transports.append(transport)
-        original_close(transport)
-
-    monkeypatch.setattr(SyncTransport, "close", recording_close)
-    with Storage(api_key=API_KEY, base_url=BASE_URL) as client:
+def test_long_timeout_applies_only_to_delete_bucket(api: respx.MockRouter) -> None:
+    listing = api.get("/storage/buckets").respond(200, json={"buckets": [], "total": 0})
+    deletion = api.delete("/storage/buckets/avatars").respond(204)
+    with Storage(api_key=API_KEY, base_url=BASE_URL, timeout=5.0) as client:
+        client.delete_bucket("avatars", confirm="avatars")
         client.list_buckets()
+
+    assert deletion.calls.last.request.extensions["timeout"]["read"] == DELETE_BUCKET_TIMEOUT_SECONDS
+    assert listing.calls.last.request.extensions["timeout"]["read"] == 5.0
+
+
+def test_timeout_above_the_delete_minimum_is_kept(api: respx.MockRouter) -> None:
+    route = api.delete("/storage/buckets/avatars").respond(204)
+    with Storage(api_key=API_KEY, base_url=BASE_URL, timeout=300.0) as client:
         client.delete_bucket("avatars", confirm="avatars")
 
-    assert len(closed_transports) == 2
+    assert route.calls.last.request.extensions["timeout"]["read"] == 300.0
 
 
-async def test_async_close_closes_both_connection_pools(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
-    api.get("/storage/buckets").respond(200, json={"buckets": [], "total": 0})
-    api.delete("/storage/buckets/avatars").respond(204)
-    closed_transports: list[AsyncTransport] = []
-    original_aclose = AsyncTransport.aclose
-
-    async def recording_aclose(transport: AsyncTransport) -> None:
-        closed_transports.append(transport)
-        await original_aclose(transport)
-
-    monkeypatch.setattr(AsyncTransport, "aclose", recording_aclose)
+async def test_async_delete_bucket_uses_long_timeout(api: respx.MockRouter) -> None:
+    route = api.delete("/storage/buckets/avatars").respond(204)
     async with AsyncStorage(api_key=API_KEY, base_url=BASE_URL) as client:
-        await client.list_buckets()
         await client.delete_bucket("avatars", confirm="avatars")
 
-    assert len(closed_transports) == 2
+    assert route.calls.last.request.extensions["timeout"]["read"] == DELETE_BUCKET_TIMEOUT_SECONDS
 
 
-def test_supplied_http_client_is_shared_by_both_pools() -> None:
+def test_supplied_http_client_is_used_for_every_request() -> None:
     seen_requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

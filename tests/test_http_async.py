@@ -19,7 +19,7 @@ from tests.test_http_sync import make_settings
 
 @pytest.fixture
 async def transport() -> AsyncIterator[AsyncTransport]:
-    async_transport = AsyncTransport(make_settings())
+    async_transport = AsyncTransport(make_settings)
     yield async_transport
     await async_transport.aclose()
 
@@ -107,7 +107,7 @@ async def test_invalid_url_is_a_configuration_error(api: respx.MockRouter, trans
 
 async def test_external_http_client_is_left_open() -> None:
     http_client = httpx.AsyncClient()
-    await AsyncTransport(make_settings(), http_client=http_client).aclose()
+    await AsyncTransport(make_settings, http_client=http_client).aclose()
 
     assert not http_client.is_closed
     await http_client.aclose()

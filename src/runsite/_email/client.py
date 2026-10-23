@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from types import TracebackType
 from typing import Any, TypeAlias
 
 import httpx
 
+from runsite._client import AsyncClient, SyncClient
 from runsite._config import DEFAULT_EMAIL_URL, read_env, resolve
 from runsite._email.models import EmailRecord, SentEmail
 from runsite._email.webhooks import Webhooks
 from runsite._errors import email_error_from_response
-from runsite._http import AsyncTransport, RequestSettings, SyncTransport
+from runsite._http import Operation, Request, RequestSettings
 
 MAX_RECIPIENTS = 50
 DEFAULT_EMAIL_TIMEOUT_SECONDS = 60.0
@@ -80,7 +80,30 @@ def email_settings(*, api_key: str | None, endpoint: str | None, timeout: float,
     )
 
 
-class Email:
+class _EmailOperations:
+    """Operations shared by `Email` and `AsyncEmail`."""
+
+    webhooks = Webhooks()
+
+    def __init__(self, *, api_key: str | None, endpoint: str | None, timeout: float, max_retries: int) -> None:
+        self._api_key = api_key
+        self._endpoint = endpoint
+        self._timeout = timeout
+        self._max_retries = max_retries
+
+    def _request_settings(self) -> RequestSettings:
+        return email_settings(
+            api_key=self._api_key, endpoint=self._endpoint, timeout=self._timeout, max_retries=self._max_retries
+        )
+
+    def _send(self, body: dict[str, Any]) -> Operation[SentEmail]:
+        return SentEmail.model_validate((yield Request("POST", "", json=body)))
+
+    def _get(self, email_id: str) -> Operation[EmailRecord]:
+        return EmailRecord.model_validate((yield Request("GET", email_path(email_id))))
+
+
+class Email(_EmailOperations, SyncClient):
     """Sends transactional email through Runsite.
 
     The API key comes from `EMAIL_API_KEY`, which Runsite sets when an email service is connected
@@ -102,8 +125,6 @@ class Email:
     `reply_to` defaults to the `from_` you passed, and every recipient must be verified first.
     """
 
-    webhooks = Webhooks()
-
     def __init__(
         self,
         *,
@@ -113,20 +134,8 @@ class Email:
         max_retries: int = 2,
         http_client: httpx.Client | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._endpoint = endpoint
-        self._timeout = timeout
-        self._max_retries = max_retries
-        self._http_client = http_client
-        self._transport: SyncTransport | None = None
-
-    def _client(self) -> SyncTransport:
-        if self._transport is None:
-            settings = email_settings(
-                api_key=self._api_key, endpoint=self._endpoint, timeout=self._timeout, max_retries=self._max_retries
-            )
-            self._transport = SyncTransport(settings, http_client=self._http_client)
-        return self._transport
+        _EmailOperations.__init__(self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries)
+        SyncClient.__init__(self, http_client=http_client)
 
     def send(
         self,
@@ -157,31 +166,15 @@ class Email:
             reply_to=reply_to,
             headers=headers,
         )
-        return SentEmail.model_validate(self._client().request("POST", "", json=body))
+        return self._run(self._send(body))
 
     def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email. Raises `ValueError` if `email_id` is not a UUID."""
-        return EmailRecord.model_validate(self._client().request("GET", email_path(email_id)))
-
-    def close(self) -> None:
-        """Close the connection pool. The client can still be used; it opens a new pool."""
-        if self._transport is not None:
-            self._transport.close()
-            self._transport = None
-
-    def __enter__(self) -> Email:
-        return self
-
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
-    ) -> None:
-        self.close()
+        return self._run(self._get(email_id))
 
 
-class AsyncEmail:
+class AsyncEmail(_EmailOperations, AsyncClient):
     """Async twin of `Email`, with the same timeouts, retry rules and errors."""
-
-    webhooks = Webhooks()
 
     def __init__(
         self,
@@ -192,20 +185,8 @@ class AsyncEmail:
         max_retries: int = 2,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._endpoint = endpoint
-        self._timeout = timeout
-        self._max_retries = max_retries
-        self._http_client = http_client
-        self._transport: AsyncTransport | None = None
-
-    def _client(self) -> AsyncTransport:
-        if self._transport is None:
-            settings = email_settings(
-                api_key=self._api_key, endpoint=self._endpoint, timeout=self._timeout, max_retries=self._max_retries
-            )
-            self._transport = AsyncTransport(settings, http_client=self._http_client)
-        return self._transport
+        _EmailOperations.__init__(self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries)
+        AsyncClient.__init__(self, http_client=http_client)
 
     async def send(
         self,
@@ -232,22 +213,8 @@ class AsyncEmail:
             reply_to=reply_to,
             headers=headers,
         )
-        return SentEmail.model_validate(await self._client().request("POST", "", json=body))
+        return await self._run(self._send(body))
 
     async def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email; see `Email.get`."""
-        return EmailRecord.model_validate(await self._client().request("GET", email_path(email_id)))
-
-    async def aclose(self) -> None:
-        """Close the connection pool. The client can still be used; it opens a new pool."""
-        if self._transport is not None:
-            await self._transport.aclose()
-            self._transport = None
-
-    async def __aenter__(self) -> AsyncEmail:
-        return self
-
-    async def __aexit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
-    ) -> None:
-        await self.aclose()
+        return await self._run(self._get(email_id))
