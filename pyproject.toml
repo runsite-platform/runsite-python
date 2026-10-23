@@ -1,0 +1,37 @@
+[project]
+name = "runsite-sdk"
+version = "0.0.1"
+description = "Official Python SDK for Runsite: email, storage and secrets for your apps"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "runsite-platform", email = "info@runsite.app" }]
+keywords = ["runsite", "sdk", "email", "storage", "s3", "secrets", "paas"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://runsite.app"
+Documentation = "https://docs.runsite.app"
+Repository = "https://github.com/runsite-platform/runsite-python"
+Issues = "https://github.com/runsite-platform/runsite-python/issues"
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "runsite"

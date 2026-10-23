@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 48" fill="none">
+  <defs>
+    <linearGradient id="mgd" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#C084FC"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="2" y="4" width="40" height="40" rx="12" fill="url(#mgd)"/>
+  <text x="22" y="33" font-family="'Inter', 'SF Pro Display', -apple-system, system-ui, sans-serif" font-size="26" font-weight="800" fill="white" text-anchor="middle">R</text>
+
+  <text x="54" y="34" font-family="'Inter', 'SF Pro Display', -apple-system, system-ui, sans-serif" font-size="28" font-weight="700" letter-spacing="-0.8" fill="#F3F4F6">Run<tspan fill="url(#mgd)">site</tspan></text>
+</svg>
