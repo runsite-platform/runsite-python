@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import re
 from collections.abc import Iterable, Mapping
+from functools import partial
 from typing import Any
 
 import httpx
@@ -10,7 +11,7 @@ import httpx
 from runsite._client import AsyncClient, SyncClient
 from runsite._config import Environment, platform_settings, resolve_service_id
 from runsite._errors import ConflictError
-from runsite._http import Operation, Request, RequestSettings
+from runsite._http import Operation, Request
 from runsite._secrets.models import ApplyResult, BulkResult, EnvVariable
 from runsite._secrets.reader import SecretReader
 
@@ -86,45 +87,20 @@ def delete_body(keys: Iterable[str], existing: Mapping[str, EnvVariable]) -> dic
     return {"variables": [{"id": existing[key].id, "key": key, "deleted": True} for key in keys if key in existing]}
 
 
-class _SecretsOperations(SecretReader):
-    """The writer operations, shared by `Secrets` and `AsyncSecrets`."""
+class SecretsOperations:
+    """The writer operations of `Secrets` and `AsyncSecrets`, for one environment and default service."""
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None,
-        base_url: str | None,
-        service_id: str | None,
-        timeout: float,
-        max_retries: int,
-        environ: Mapping[str, str] | None,
-    ) -> None:
-        SecretReader.__init__(self, environ=environ)
-        self._environment = Environment(environ)
-        self._api_key = api_key
-        self._base_url = base_url
+    def __init__(self, environment: Environment, *, service_id: str | None) -> None:
+        self._environment = environment
         self._service_id = service_id
-        self._timeout = timeout
-        self._max_retries = max_retries
-
-    def _request_settings(self) -> RequestSettings:
-        return platform_settings(
-            self._environment,
-            api_key=self._api_key,
-            base_url=self._base_url,
-            timeout=self._timeout,
-            max_retries=self._max_retries,
-        )
 
     def _target(self, call_service_id: str | None) -> str:
         return resolve_service_id(self._environment, call_service_id, self._service_id)
 
-    def _list(self, service_id: str | None) -> Operation[builtins.list[EnvVariable]]:
+    def list(self, service_id: str | None) -> Operation[builtins.list[EnvVariable]]:
         return parse_variables((yield Request("GET", env_path(self._target(service_id)))))
 
-    def _set_many(
-        self, values: Mapping[str, str], secret: bool | None, service_id: str | None
-    ) -> Operation[BulkResult]:
+    def set_many(self, values: Mapping[str, str], secret: bool | None, service_id: str | None) -> Operation[BulkResult]:
         validate_variables(values)
         if not values:
             return BulkResult()
@@ -134,14 +110,14 @@ class _SecretsOperations(SecretReader):
         except ConflictError:
             return (yield from _upsert(target, values, secret))
 
-    def _delete(self, keys: tuple[str, ...], service_id: str | None) -> Operation[BulkResult]:
+    def delete(self, keys: tuple[str, ...], service_id: str | None) -> Operation[BulkResult]:
         target = self._target(service_id)
         body = delete_body(keys, variables_by_key((yield Request("GET", env_path(target)))))
         if not body["variables"]:
             return BulkResult()
         return BulkResult.model_validate((yield Request("PUT", bulk_path(target), json=body)))
 
-    def _apply(self, service_id: str | None) -> Operation[ApplyResult]:
+    def apply(self, service_id: str | None) -> Operation[ApplyResult]:
         return ApplyResult.model_validate((yield Request("POST", apply_path(self._target(service_id)))))
 
 
@@ -151,7 +127,7 @@ def _upsert(target: str, values: Mapping[str, str], secret: bool | None) -> Oper
     return BulkResult.model_validate(response)
 
 
-class Secrets(_SecretsOperations, SyncClient):
+class Secrets(SecretReader, SyncClient):
     """Reads variables from the environment and writes them to a Runsite web service.
 
     The service id, API key and base URL come from the constructor arguments, else from the same mapping
@@ -177,20 +153,21 @@ class Secrets(_SecretsOperations, SyncClient):
         http_client: httpx.Client | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        _SecretsOperations.__init__(
-            self,
+        SecretReader.__init__(self, environ=environ)
+        settings = partial(
+            platform_settings,
+            self._environment,
             api_key=api_key,
             base_url=base_url,
-            service_id=service_id,
             timeout=timeout,
             max_retries=max_retries,
-            environ=environ,
         )
-        SyncClient.__init__(self, http_client=http_client)
+        SyncClient.__init__(self, settings, http_client=http_client)
+        self._operations = SecretsOperations(self._environment, service_id=service_id)
 
     def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:
         """List the service's variables: keys and flags only, values are never returned."""
-        return self._run(self._list(service_id))
+        return self._run(self._operations.list(service_id))
 
     def set(self, key: str, value: str, *, secret: bool | None = None, service_id: str | None = None) -> BulkResult:
         """Create or update one variable; see `set_many` for the `secret` flag."""
@@ -206,11 +183,11 @@ class Secrets(_SecretsOperations, SyncClient):
         (`ValueError`, or `TypeError` for a non-str value). If another writer creates one of the keys at the
         same moment, the read-and-write is repeated once; a second conflict raises `ConflictError`.
         """
-        return self._run(self._set_many(values, secret, service_id))
+        return self._run(self._operations.set_many(values, secret, service_id))
 
     def delete(self, *keys: str, service_id: str | None = None) -> BulkResult:
         """Delete variables by key; keys that do not exist are ignored."""
-        return self._run(self._delete(keys, service_id))
+        return self._run(self._operations.delete(keys, service_id))
 
     def apply(self, *, service_id: str | None = None) -> ApplyResult:
         """Push the stored variables to the service with a rolling restart (no rebuild).
@@ -223,10 +200,10 @@ class Secrets(_SecretsOperations, SyncClient):
         deploy is in progress, `BadRequestError` (400) when the service is blocked or out of traffic, and an
         `InternalServerError` subclass (503) when the restart could not be queued; retry it later.
         """
-        return self._run(self._apply(service_id))
+        return self._run(self._operations.apply(service_id))
 
 
-class AsyncSecrets(_SecretsOperations, AsyncClient):
+class AsyncSecrets(SecretReader, AsyncClient):
     """Async twin of `Secrets` with the same configuration, permissions and semantics; reads stay synchronous."""
 
     def __init__(
@@ -240,20 +217,21 @@ class AsyncSecrets(_SecretsOperations, AsyncClient):
         http_client: httpx.AsyncClient | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        _SecretsOperations.__init__(
-            self,
+        SecretReader.__init__(self, environ=environ)
+        settings = partial(
+            platform_settings,
+            self._environment,
             api_key=api_key,
             base_url=base_url,
-            service_id=service_id,
             timeout=timeout,
             max_retries=max_retries,
-            environ=environ,
         )
-        AsyncClient.__init__(self, http_client=http_client)
+        AsyncClient.__init__(self, settings, http_client=http_client)
+        self._operations = SecretsOperations(self._environment, service_id=service_id)
 
     async def list(self, *, service_id: str | None = None) -> builtins.list[EnvVariable]:
         """See `Secrets.list`."""
-        return await self._run(self._list(service_id))
+        return await self._run(self._operations.list(service_id))
 
     async def set(
         self, key: str, value: str, *, secret: bool | None = None, service_id: str | None = None
@@ -265,12 +243,12 @@ class AsyncSecrets(_SecretsOperations, AsyncClient):
         self, values: Mapping[str, str], *, secret: bool | None = None, service_id: str | None = None
     ) -> BulkResult:
         """See `Secrets.set_many`."""
-        return await self._run(self._set_many(values, secret, service_id))
+        return await self._run(self._operations.set_many(values, secret, service_id))
 
     async def delete(self, *keys: str, service_id: str | None = None) -> BulkResult:
         """See `Secrets.delete`."""
-        return await self._run(self._delete(keys, service_id))
+        return await self._run(self._operations.delete(keys, service_id))
 
     async def apply(self, *, service_id: str | None = None) -> ApplyResult:
         """See `Secrets.apply`."""
-        return await self._run(self._apply(service_id))
+        return await self._run(self._operations.apply(service_id))

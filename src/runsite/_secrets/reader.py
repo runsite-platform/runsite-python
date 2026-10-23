@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar, overload
 
+from runsite._config import Environment
 from runsite._errors import InvalidSecretError, MissingSecretError
 
 DefaultT = TypeVar("DefaultT")
@@ -68,14 +68,11 @@ class SecretReader:
     """
 
     def __init__(self, *, environ: Mapping[str, str] | None = None) -> None:
-        self._environ = environ
-
-    def _source(self) -> Mapping[str, str]:
-        return self._environ if self._environ is not None else os.environ
+        self._environment = Environment(environ)
 
     def _convert(self, key: str, default: Any, convert: Callable[[str], ValueT], type_name: str) -> Any:
-        raw = self._source().get(key)
-        if not raw:
+        raw = self._environment.get(key)
+        if raw is None:
             if default is MISSING:
                 raise MissingSecretError([key])
             return default
@@ -136,8 +133,7 @@ class SecretReader:
 
     def require(self, *keys: str) -> None:
         """Raise one MissingSecretError naming every key that is unset or empty."""
-        source = self._source()
-        missing = [key for key in keys if not source.get(key)]
+        missing = self._environment.missing(*keys)
         if missing:
             raise MissingSecretError(missing)
 
@@ -151,5 +147,4 @@ class SecretReader:
 
     def is_runsite(self) -> bool:
         """True inside a container started by Runsite."""
-        source = self._source()
-        return bool(source.get("APP_NAME")) and bool(source.get("APP_PORT"))
+        return not self._environment.missing("APP_NAME", "APP_PORT")

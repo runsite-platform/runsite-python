@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any, TypeAlias
 
 import httpx
@@ -10,7 +11,7 @@ from runsite._client import AsyncClient, SyncClient
 from runsite._config import Environment, email_settings
 from runsite._email.models import EmailRecord, SentEmail
 from runsite._email.webhooks import Webhooks
-from runsite._http import Operation, Request, RequestSettings
+from runsite._http import Operation, Request
 
 MAX_RECIPIENTS = 50
 DEFAULT_EMAIL_TIMEOUT_SECONDS = 60.0
@@ -66,43 +67,15 @@ def email_path(email_id: str) -> str:
     return f"/{normalized_id}"
 
 
-class _EmailOperations:
-    """Operations shared by `Email` and `AsyncEmail`."""
-
-    webhooks = Webhooks()
-
-    def __init__(
-        self,
-        *,
-        api_key: str | None,
-        endpoint: str | None,
-        timeout: float,
-        max_retries: int,
-        environ: Mapping[str, str] | None,
-    ) -> None:
-        self._environment = Environment(environ)
-        self._api_key = api_key
-        self._endpoint = endpoint
-        self._timeout = timeout
-        self._max_retries = max_retries
-
-    def _request_settings(self) -> RequestSettings:
-        return email_settings(
-            self._environment,
-            api_key=self._api_key,
-            endpoint=self._endpoint,
-            timeout=self._timeout,
-            max_retries=self._max_retries,
-        )
-
-    def _send(self, body: dict[str, Any]) -> Operation[SentEmail]:
-        return SentEmail.model_validate((yield Request("POST", "", json=body)))
-
-    def _get(self, email_id: str) -> Operation[EmailRecord]:
-        return EmailRecord.model_validate((yield Request("GET", email_path(email_id))))
+def send_email(body: dict[str, Any]) -> Operation[SentEmail]:
+    return SentEmail.model_validate((yield Request("POST", "", json=body)))
 
 
-class Email(_EmailOperations, SyncClient):
+def get_email(email_id: str) -> Operation[EmailRecord]:
+    return EmailRecord.model_validate((yield Request("GET", email_path(email_id))))
+
+
+class Email(SyncClient):
     """Sends transactional email through Runsite.
 
     The API key comes from `EMAIL_API_KEY`, which Runsite sets when an email service is connected
@@ -124,6 +97,8 @@ class Email(_EmailOperations, SyncClient):
     `reply_to` defaults to the `from_` you passed, and every recipient must be verified first.
     """
 
+    webhooks = Webhooks()
+
     def __init__(
         self,
         *,
@@ -134,10 +109,15 @@ class Email(_EmailOperations, SyncClient):
         http_client: httpx.Client | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        _EmailOperations.__init__(
-            self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries, environ=environ
+        settings = partial(
+            email_settings,
+            Environment(environ),
+            api_key=api_key,
+            endpoint=endpoint,
+            timeout=timeout,
+            max_retries=max_retries,
         )
-        SyncClient.__init__(self, http_client=http_client)
+        super().__init__(settings, http_client=http_client)
 
     def send(
         self,
@@ -168,15 +148,17 @@ class Email(_EmailOperations, SyncClient):
             reply_to=reply_to,
             headers=headers,
         )
-        return self._run(self._send(body))
+        return self._run(send_email(body))
 
     def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email. Raises `ValueError` if `email_id` is not a UUID."""
-        return self._run(self._get(email_id))
+        return self._run(get_email(email_id))
 
 
-class AsyncEmail(_EmailOperations, AsyncClient):
+class AsyncEmail(AsyncClient):
     """Async twin of `Email`, with the same timeouts, retry rules and errors."""
+
+    webhooks = Webhooks()
 
     def __init__(
         self,
@@ -188,10 +170,15 @@ class AsyncEmail(_EmailOperations, AsyncClient):
         http_client: httpx.AsyncClient | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        _EmailOperations.__init__(
-            self, api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries, environ=environ
+        settings = partial(
+            email_settings,
+            Environment(environ),
+            api_key=api_key,
+            endpoint=endpoint,
+            timeout=timeout,
+            max_retries=max_retries,
         )
-        AsyncClient.__init__(self, http_client=http_client)
+        super().__init__(settings, http_client=http_client)
 
     async def send(
         self,
@@ -218,8 +205,8 @@ class AsyncEmail(_EmailOperations, AsyncClient):
             reply_to=reply_to,
             headers=headers,
         )
-        return await self._run(self._send(body))
+        return await self._run(send_email(body))
 
     async def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email; see `Email.get`."""
-        return await self._run(self._get(email_id))
+        return await self._run(get_email(email_id))

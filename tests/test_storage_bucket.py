@@ -17,10 +17,10 @@ from runsite._storage.bucket import (
     MAX_PRESIGN_SECONDS,
     MULTIPART_CHUNK_BYTES,
     Bucket,
-    make_s3_client,
 )
 from runsite._storage.control import AsyncStorage, Storage
 from runsite._storage.models import AccessKey
+from runsite._storage.registry import BucketRegistry, make_s3_client
 
 AWS_VARIABLES = (
     "AWS_ACCESS_KEY_ID",
@@ -66,6 +66,10 @@ class FakeS3Client:
         self._error = error
         self._delete_errors = list(delete_errors or [])
         self.objects: dict[str, bytes] = {"a.txt": b"hello"}
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
     def _record(self, name: str, **kwargs: Any) -> None:
         self.calls.append((name, kwargs))
@@ -561,3 +565,59 @@ def test_async_storage_bucket_is_an_async_bucket_cached_per_name() -> None:
     assert bucket.name == "uploads"
     assert storage.bucket("uploads") is bucket
     assert bucket.public_url("x") == "https://s3.runsite.test/uploads/x"
+
+
+def fake_registry(environ: dict[str, str]) -> tuple[BucketRegistry, list[FakeS3Client]]:
+    created_clients: list[FakeS3Client] = []
+
+    def client_factory(credentials: Any) -> FakeS3Client:
+        client = FakeS3Client()
+        created_clients.append(client)
+        return client
+
+    return BucketRegistry(Environment(environ), client_factory=client_factory), created_clients
+
+
+def test_registry_shares_one_client_between_sync_and_async_buckets() -> None:
+    registry, created_clients = fake_registry({**RUNSITE_VARIABLES, "S3_BUCKET": "uploads"})
+
+    sync_bucket = registry.bucket(None, None)
+    async_bucket = registry.async_bucket("uploads", None)
+
+    assert len(created_clients) == 1
+    assert async_bucket.sync is sync_bucket
+    assert registry.async_bucket(None, None) is async_bucket
+
+
+def test_registry_close_closes_every_client_and_keeps_buckets_usable() -> None:
+    registry, created_clients = fake_registry(RUNSITE_VARIABLES)
+    first = registry.bucket("avatars", None)
+    registry.bucket("avatars", created_key())
+
+    registry.close()
+
+    assert [client.closed for client in created_clients] == [True, True]
+    assert registry.bucket("avatars", None) is first
+    assert first.download("a.txt") == b"hello"
+
+
+def test_storage_close_closes_bucket_clients() -> None:
+    storage = Storage(environ=RUNSITE_VARIABLES)
+    bucket = storage.bucket("avatars")
+    closed: list[bool] = []
+    bucket.client.close = lambda: closed.append(True)
+
+    storage.close()
+
+    assert closed == [True]
+
+
+async def test_async_storage_aclose_closes_bucket_clients() -> None:
+    storage = AsyncStorage(environ=RUNSITE_VARIABLES)
+    bucket = storage.bucket("avatars")
+    closed: list[bool] = []
+    bucket.client.close = lambda: closed.append(True)
+
+    await storage.aclose()
+
+    assert closed == [True]

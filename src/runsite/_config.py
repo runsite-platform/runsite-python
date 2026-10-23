@@ -43,6 +43,10 @@ class Environment:
                 return value
         return None
 
+    def missing(self, *names: str) -> list[str]:
+        """The names among `names` that are unset or empty, in the given order."""
+        return [name for name in names if self.get(name) is None]
+
     def require(self, explicit: str | None, *names: str, hint: str) -> str:
         """Return `explicit` or the first set variable, or raise naming the primary variable."""
         value = explicit or self.get(*names)

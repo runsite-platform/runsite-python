@@ -32,6 +32,13 @@ def test_get_returns_first_non_empty() -> None:
     assert environment.get("MISSING") is None
 
 
+def test_missing_lists_unset_and_empty_names_in_order() -> None:
+    environment = Environment({"SET": "value", "EMPTY": ""})
+
+    assert environment.missing("EMPTY", "SET", "ABSENT") == ["EMPTY", "ABSENT"]
+    assert environment.missing("SET") == []
+
+
 def test_require_prefers_explicit() -> None:
     environment = Environment({"RUNSITE_API_KEY": "from-env"})
 

@@ -10,11 +10,12 @@ from typing import Any
 import httpx
 import pytest
 
+from runsite._config import Environment
 from runsite._errors import ConflictError, NotFoundError, api_error_from_response
 from runsite._http import Call, Operation, Request, RequestSettings, Wait, execute
-from runsite._secrets import Secrets
-from runsite._storage import Storage
-from tests.constants import API_KEY, API_URL, BASE_URL
+from runsite._secrets.writer import SecretsOperations
+from runsite._storage.control import create_key
+from tests.constants import API_URL
 
 SERVICE_ID = "svc-1"
 SETTINGS = RequestSettings(
@@ -64,8 +65,8 @@ def listing(*variables: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def secrets() -> Secrets:
-    return Secrets(api_key=API_KEY, base_url=BASE_URL, service_id=SERVICE_ID, environ={})
+def secrets() -> SecretsOperations:
+    return SecretsOperations(Environment({}), service_id=SERVICE_ID)
 
 
 def test_single_request_returns_parsed_body() -> None:
@@ -119,7 +120,7 @@ def test_min_timeout_raises_the_client_timeout() -> None:
     assert steps[0].timeout == 120.0
 
 
-def test_set_many_repeats_read_and_write_once_after_a_conflict(secrets: Secrets) -> None:
+def test_set_many_repeats_read_and_write_once_after_a_conflict(secrets: SecretsOperations) -> None:
     replies = [
         respond(200, listing()),
         respond(409, {"detail": "exists"}),
@@ -127,7 +128,7 @@ def test_set_many_repeats_read_and_write_once_after_a_conflict(secrets: Secrets)
         respond(200, {"updated": 1}),
     ]
 
-    result, steps = run_scripted(secrets._set_many({"TOKEN": "value"}, None, None), replies)
+    result, steps = run_scripted(secrets.set_many({"TOKEN": "value"}, None, None), replies)
 
     assert result.updated == 1
     assert calls(steps) == [
@@ -138,7 +139,7 @@ def test_set_many_repeats_read_and_write_once_after_a_conflict(secrets: Secrets)
     ]
 
 
-def test_set_many_gives_up_after_a_second_conflict(secrets: Secrets) -> None:
+def test_set_many_gives_up_after_a_second_conflict(secrets: SecretsOperations) -> None:
     replies = [
         respond(200, listing()),
         respond(409, {"detail": "exists"}),
@@ -147,34 +148,33 @@ def test_set_many_gives_up_after_a_second_conflict(secrets: Secrets) -> None:
     ]
 
     with pytest.raises(ConflictError):
-        run_scripted(secrets._set_many({"TOKEN": "value"}, None, None), replies)
+        run_scripted(secrets.set_many({"TOKEN": "value"}, None, None), replies)
 
 
 def test_set_many_validates_before_resolving_the_service() -> None:
-    unconfigured = Secrets(environ={})
+    unconfigured = SecretsOperations(Environment({}), service_id=None)
 
     with pytest.raises(ValueError, match="not a valid key"):
-        run_scripted(unconfigured._set_many({"bad key": "value"}, None, None), [])
+        run_scripted(unconfigured.set_many({"bad key": "value"}, None, None), [])
 
 
 def test_set_many_with_nothing_to_write_needs_no_configuration() -> None:
-    unconfigured = Secrets(environ={})
+    unconfigured = SecretsOperations(Environment({}), service_id=None)
 
-    result, steps = run_scripted(unconfigured._set_many({}, None, None), [])
+    result, steps = run_scripted(unconfigured.set_many({}, None, None), [])
 
     assert result.created == result.updated == result.deleted == 0
     assert steps == []
 
 
-def test_delete_skips_the_write_when_no_key_exists(secrets: Secrets) -> None:
-    result, steps = run_scripted(secrets._delete(("MISSING",), None), [respond(200, listing())])
+def test_delete_skips_the_write_when_no_key_exists(secrets: SecretsOperations) -> None:
+    result, steps = run_scripted(secrets.delete(("MISSING",), None), [respond(200, listing())])
 
     assert result.deleted == 0
     assert calls(steps) == [f"GET /web-services/{SERVICE_ID}/env"]
 
 
 def test_create_key_looks_up_the_bucket_id_by_name() -> None:
-    storage = Storage(api_key=API_KEY, base_url=BASE_URL)
     bucket = {"id": "b1", "name": "avatars", "is_public": False, "created_at": "2026-10-22T10:00:00Z"}
     created = {
         "id": "k1",
@@ -187,7 +187,7 @@ def test_create_key_looks_up_the_bucket_id_by_name() -> None:
     }
 
     result, steps = run_scripted(
-        storage._create_key("avatars", None, True, True, False), [respond(200, bucket), respond(201, created)]
+        create_key("avatars", None, True, True, False), [respond(200, bucket), respond(201, created)]
     )
 
     assert result.bucket_id == "b1"

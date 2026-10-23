@@ -9,9 +9,8 @@ from typing import IO, Any, TypeAlias
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
-from runsite._config import Environment, S3Credentials, resolve_bucket_name, s3_credentials
-from runsite._errors import ConfigurationError, ObjectNotFoundError, StorageAccessDeniedError, StorageError
-from runsite._storage.models import AccessKey, ObjectInfo
+from runsite._errors import ObjectNotFoundError, StorageAccessDeniedError, StorageError
+from runsite._storage.models import ObjectInfo
 
 MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024
 MULTIPART_CHUNK_BYTES = 16 * 1024 * 1024
@@ -25,7 +24,6 @@ MAX_REPORTED_FAILURES = 10
 NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NoSuchBucket", "NotFound"})
 ACCESS_DENIED_CODES = frozenset({"403", "AccessDenied", "Forbidden"})
 PRESIGN_METHODS = {"GET": "get_object", "PUT": "put_object", "DELETE": "delete_object", "HEAD": "head_object"}
-INSTALL_HINT = 'Object storage needs boto3: pip install "runsite-sdk[storage]"'
 DELETE_DENIED_HINT = (
     "This key has no delete permission. Keys injected by a dashboard connection are read/write only; "
     "create one with storage.create_key(bucket=..., delete=True) and pass it as access_key=..."
@@ -36,64 +34,6 @@ STR_SOURCE_HINT = (
 )
 
 UploadSource: TypeAlias = "bytes | str | PathLike[str] | IO[bytes]"
-
-
-def _boto3() -> Any:
-    try:
-        import boto3
-    except ImportError as error:
-        raise ConfigurationError(INSTALL_HINT) from error
-    return boto3
-
-
-def credentials_for(access_key: AccessKey | None, environment: Environment) -> S3Credentials:
-    """Credentials of a created key, else the ones injected into the environment."""
-    if access_key is None:
-        return s3_credentials(environment)
-    return S3Credentials(
-        key_id=access_key.access_key,
-        secret=access_key.secret_key.reveal(),
-        endpoint_url=access_key.endpoint_url,
-        region=access_key.region,
-    )
-
-
-def make_s3_client(credentials: S3Credentials) -> Any:
-    """Build a boto3 S3 client for Runsite storage."""
-    boto3 = _boto3()
-    from botocore.config import Config
-
-    config = Config(
-        signature_version="s3v4",
-        s3={"addressing_style": "path"},
-        request_checksum_calculation="when_required",
-        response_checksum_validation="when_required",
-    )
-    return boto3.client(
-        "s3",
-        endpoint_url=credentials.endpoint_url,
-        region_name=credentials.region,
-        aws_access_key_id=credentials.key_id,
-        aws_secret_access_key=credentials.secret,
-        config=config,
-    )
-
-
-def cached_bucket(
-    cache: dict[tuple[str, str | None], Bucket],
-    name: str | None,
-    access_key: AccessKey | None,
-    environment: Environment,
-) -> Bucket:
-    """Return the cached `Bucket` for this name and key, creating its boto3 client on first use."""
-    resolved_name = resolve_bucket_name(environment, name)
-    cache_key = (resolved_name, access_key.access_key if access_key is not None else None)
-    bucket = cache.get(cache_key)
-    if bucket is None:
-        credentials = credentials_for(access_key, environment)
-        bucket = Bucket(resolved_name, client=make_s3_client(credentials), endpoint_url=credentials.endpoint_url)
-        cache[cache_key] = bucket
-    return bucket
 
 
 def _translate(error: Exception, *, denied_hint: str | None = None) -> StorageError:
