@@ -1,11 +1,14 @@
 import json
 from collections.abc import Iterator
 
+import httpx
 import pytest
 import respx
 
 from runsite._errors import ConflictError, PermissionDeniedError
+from runsite._http import AsyncTransport, SyncTransport
 from runsite._storage.control import DELETE_BUCKET_TIMEOUT_SECONDS, AsyncStorage, Storage
+from runsite._storage.models import BucketInfo
 from tests.constants import API_KEY, BASE_URL
 
 BUCKET_ID = "5b0f6d2a-3c1e-4f8a-9d7b-2e6c1a4b8f00"
@@ -168,3 +171,83 @@ async def test_async_control_plane(api: respx.MockRouter) -> None:
     assert json.loads(key_route.calls.last.request.content)["bucket_id"] == BUCKET_ID
     assert delete_key_route.called
     assert delete_bucket_route.calls.last.request.extensions["timeout"]["read"] == DELETE_BUCKET_TIMEOUT_SECONDS
+
+
+def test_create_key_for_bucket_info_sends_its_id(api: respx.MockRouter, storage: Storage) -> None:
+    route = api.post("/storage/keys").respond(201, json=CREATED_KEY)
+
+    storage.create_key(bucket=BucketInfo.model_validate(BUCKET))
+
+    assert json.loads(route.calls.last.request.content)["bucket_id"] == BUCKET_ID
+
+
+async def test_async_create_key_for_bucket_info_sends_its_id(api: respx.MockRouter) -> None:
+    route = api.post("/storage/keys").respond(201, json=CREATED_KEY)
+
+    async with AsyncStorage(api_key=API_KEY, base_url=BASE_URL) as client:
+        await client.create_key(bucket=BucketInfo.model_validate(BUCKET))
+
+    assert json.loads(route.calls.last.request.content)["bucket_id"] == BUCKET_ID
+
+
+def test_list_keys_sends_page_and_size(api: respx.MockRouter, storage: Storage) -> None:
+    route = api.get("/storage/keys").respond(200, json=KEY_LISTING)
+
+    storage.list_keys(page=3, size=10)
+
+    assert dict(route.calls.last.request.url.params) == {"page": "3", "size": "10"}
+
+
+def test_close_closes_both_connection_pools(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
+    api.get("/storage/buckets").respond(200, json={"buckets": [], "total": 0})
+    api.delete("/storage/buckets/avatars").respond(204)
+    closed_transports: list[SyncTransport] = []
+    original_close = SyncTransport.close
+
+    def recording_close(transport: SyncTransport) -> None:
+        closed_transports.append(transport)
+        original_close(transport)
+
+    monkeypatch.setattr(SyncTransport, "close", recording_close)
+    with Storage(api_key=API_KEY, base_url=BASE_URL) as client:
+        client.list_buckets()
+        client.delete_bucket("avatars", confirm="avatars")
+
+    assert len(closed_transports) == 2
+
+
+async def test_async_close_closes_both_connection_pools(api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> None:
+    api.get("/storage/buckets").respond(200, json={"buckets": [], "total": 0})
+    api.delete("/storage/buckets/avatars").respond(204)
+    closed_transports: list[AsyncTransport] = []
+    original_aclose = AsyncTransport.aclose
+
+    async def recording_aclose(transport: AsyncTransport) -> None:
+        closed_transports.append(transport)
+        await original_aclose(transport)
+
+    monkeypatch.setattr(AsyncTransport, "aclose", recording_aclose)
+    async with AsyncStorage(api_key=API_KEY, base_url=BASE_URL) as client:
+        await client.list_buckets()
+        await client.delete_bucket("avatars", confirm="avatars")
+
+    assert len(closed_transports) == 2
+
+
+def test_supplied_http_client_is_shared_by_both_pools() -> None:
+    seen_requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(f"{request.method} {request.url.path}")
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"buckets": [], "total": 0})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+        Storage(api_key=API_KEY, base_url=BASE_URL, http_client=http_client) as client,
+    ):
+        client.list_buckets()
+        client.delete_bucket("avatars", confirm="avatars")
+
+    assert seen_requests == ["GET /api/v1/storage/buckets", "DELETE /api/v1/storage/buckets/avatars"]

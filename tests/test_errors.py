@@ -118,6 +118,12 @@ def test_retry_after_http_date_is_seconds_from_now() -> None:
     assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT", now=now) == 30.0
 
 
+def test_retry_after_http_date_without_zone_is_utc() -> None:
+    now = datetime(2026, 10, 21, 7, 27, 30, tzinfo=timezone.utc)
+
+    assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 -0000", now=now) == 30.0
+
+
 @pytest.mark.parametrize("header", ["-5", "Thu, 01 Jan 2015 00:00:00 GMT"])
 def test_retry_after_property_is_never_negative(header: str) -> None:
     error = api_error_from_response(make_response(429, {"detail": "slow"}, headers={"Retry-After": header}))

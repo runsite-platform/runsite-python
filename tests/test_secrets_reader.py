@@ -91,6 +91,10 @@ def test_get_list() -> None:
     assert reader.get_list("OTHER_HOSTS", default=[]) == []
 
 
+def test_get_list_with_custom_separator() -> None:
+    assert reader_with(HOSTS="a.com; b.com;c,d.com").get_list("HOSTS", separator=";") == ["a.com", "b.com", "c,d.com"]
+
+
 def test_get_json() -> None:
     assert reader_with(FLAGS='{"beta": true}').get_json("FLAGS") == {"beta": True}
 
@@ -138,3 +142,15 @@ def test_database_and_redis_urls() -> None:
 def test_is_runsite() -> None:
     assert reader_with().is_runsite() is False
     assert reader_with(APP_NAME="api", APP_PORT="8000").is_runsite() is True
+
+
+@pytest.mark.parametrize("raw", ["1.5", "2e3", "0x10"])
+def test_get_int_rejects_non_integer_text(raw: str) -> None:
+    with pytest.raises(InvalidSecretError):
+        reader_with(WORKERS=raw).get_int("WORKERS")
+
+
+def test_empty_injected_mapping_does_not_fall_back_to_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUNSITE_SDK_READER_PROBE", "from-process")
+
+    assert SecretReader(environ={}).get("RUNSITE_SDK_READER_PROBE", default=None) is None
