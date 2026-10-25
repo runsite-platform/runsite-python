@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from runsite._secrets.reader import Secret
+from runsite._secret import Secret
 
 
 class BucketInfo(BaseModel):

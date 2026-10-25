@@ -1,17 +1,55 @@
-"""Turns a bucket name and optional access key into a connected `Bucket`, once per name and key."""
+"""Turns a bucket name and optional access key into a connected `Bucket`, once per name and key.
+
+This is also where the bucket name and S3 credentials are read from the environment.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-from runsite._config import Environment, S3Credentials, resolve_bucket_name, s3_credentials
+from runsite._environment import Environment
 from runsite._errors import ConfigurationError
 from runsite._storage.async_bucket import AsyncBucket
 from runsite._storage.bucket import Bucket
 from runsite._storage.models import AccessKey
 
 INSTALL_HINT = 'Object storage needs boto3: pip install "runsite-sdk[storage]"'
+DEFAULT_S3_REGION = "auto"
+S3_CREDENTIALS_HINT = "Connect a bucket to this web service in the Runsite dashboard, or pass access_key=..."
+BUCKET_HINT = "Pass the bucket name or connect a bucket to this service."
+
+
+@dataclass(frozen=True)
+class S3Credentials:
+    key_id: str
+    secret: str = field(repr=False)
+    endpoint_url: str
+    region: str
+
+
+def resolve_bucket_name(environment: Environment, name: str | None) -> str:
+    return environment.require(name, "S3_BUCKET", hint=BUCKET_HINT)
+
+
+def s3_credentials(environment: Environment) -> S3Credentials:
+    """Credentials from S3_*, or from AWS_* only when AWS_ENDPOINT_URL_S3 is set.
+
+    AWS_* keys are never paired with S3_ENDPOINT_URL, so real AWS credentials are not sent to Runsite.
+    """
+    if environment.get("S3_ACCESS_KEY_ID") or not environment.get("AWS_ENDPOINT_URL_S3"):
+        names = ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_ENDPOINT_URL")
+    else:
+        names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL_S3")
+    key_id, secret, endpoint = (environment.require(None, name, hint=S3_CREDENTIALS_HINT) for name in names)
+    return S3Credentials(
+        key_id=key_id,
+        secret=secret,
+        endpoint_url=endpoint,
+        region=environment.get("S3_REGION") or DEFAULT_S3_REGION,
+    )
+
 
 S3ClientFactory = Callable[[S3Credentials], Any]
 BucketCacheKey = tuple[str, "str | None"]

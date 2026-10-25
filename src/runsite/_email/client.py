@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from functools import partial
 from typing import Any, TypeAlias
 
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._config import Environment, email_settings
+from runsite._dialects import email_api
 from runsite._email.models import EmailRecord, SentEmail
 from runsite._email.webhooks import Webhooks
+from runsite._environment import Environment
 from runsite._http import Operation, Request
 
 MAX_RECIPIENTS = 50
@@ -67,7 +67,22 @@ def email_path(email_id: str) -> str:
     return f"/{normalized_id}"
 
 
-def send_email(body: dict[str, Any]) -> Operation[SentEmail]:
+def send_email(
+    *,
+    from_: str,
+    to: Recipients,
+    subject: str,
+    html: str | None,
+    text: str | None,
+    cc: Recipients | None,
+    bcc: Recipients | None,
+    reply_to: Recipients | None,
+    headers: Mapping[str, str] | None,
+) -> Operation[SentEmail]:
+    """Validate the message, then send it; input errors come before any configuration error."""
+    body = build_send_body(
+        from_=from_, to=to, subject=subject, html=html, text=text, cc=cc, bcc=bcc, reply_to=reply_to, headers=headers
+    )
     return SentEmail.model_validate((yield Request("POST", "", json=body)))
 
 
@@ -109,13 +124,8 @@ class Email(SyncClient):
         http_client: httpx.Client | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        settings = partial(
-            email_settings,
-            Environment(environ),
-            api_key=api_key,
-            endpoint=endpoint,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = email_api(
+            Environment(environ), api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries
         )
         super().__init__(settings, http_client=http_client)
 
@@ -137,18 +147,19 @@ class Email(SyncClient):
         Returns once the provider accepted the email (`status == "sent"`). Raises `APITimeoutError`
         when no answer came in time; the email may have been sent anyway.
         """
-        body = build_send_body(
-            from_=from_,
-            to=to,
-            subject=subject,
-            html=html,
-            text=text,
-            cc=cc,
-            bcc=bcc,
-            reply_to=reply_to,
-            headers=headers,
+        return self._run(
+            send_email(
+                from_=from_,
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+                cc=cc,
+                bcc=bcc,
+                reply_to=reply_to,
+                headers=headers,
+            )
         )
-        return self._run(send_email(body))
 
     def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email. Raises `ValueError` if `email_id` is not a UUID."""
@@ -170,13 +181,8 @@ class AsyncEmail(AsyncClient):
         http_client: httpx.AsyncClient | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        settings = partial(
-            email_settings,
-            Environment(environ),
-            api_key=api_key,
-            endpoint=endpoint,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = email_api(
+            Environment(environ), api_key=api_key, endpoint=endpoint, timeout=timeout, max_retries=max_retries
         )
         super().__init__(settings, http_client=http_client)
 
@@ -194,18 +200,19 @@ class AsyncEmail(AsyncClient):
         headers: Mapping[str, str] | None = None,
     ) -> SentEmail:
         """Send one email; see `Email.send`."""
-        body = build_send_body(
-            from_=from_,
-            to=to,
-            subject=subject,
-            html=html,
-            text=text,
-            cc=cc,
-            bcc=bcc,
-            reply_to=reply_to,
-            headers=headers,
+        return await self._run(
+            send_email(
+                from_=from_,
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+                cc=cc,
+                bcc=bcc,
+                reply_to=reply_to,
+                headers=headers,
+            )
         )
-        return await self._run(send_email(body))
 
     async def get(self, email_id: str) -> EmailRecord:
         """Fetch the delivery status of a sent email; see `Email.get`."""

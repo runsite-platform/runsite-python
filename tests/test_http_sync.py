@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from runsite._dialects import api_error_from_response
 from runsite._errors import (
     APIConnectionError,
     APIStatusError,
@@ -11,11 +12,11 @@ from runsite._errors import (
     ConfigurationError,
     NotFoundError,
     ServiceUnavailableError,
-    api_error_from_response,
 )
-from runsite._http import RequestSettings, SyncTransport, backoff_delay
+from runsite._http import Request, RequestSettings, SyncTransport, backoff_delay
 from tests.conftest import FakeClock
 from tests.constants import API_KEY, API_URL
+from tests.helpers import single
 
 
 def make_settings(max_retries: int = 2) -> RequestSettings:
@@ -38,7 +39,7 @@ def transport() -> Iterator[SyncTransport]:
 def test_sends_auth_and_user_agent(api: respx.MockRouter, transport: SyncTransport) -> None:
     route = api.get("/users/me").respond(200, json={"ok": True})
 
-    assert transport.request("GET", "/users/me") == {"ok": True}
+    assert transport.run(single(Request("GET", "/users/me"))) == {"ok": True}
     request = route.calls.last.request
     assert request.headers["Authorization"] == f"Bearer {API_KEY}"
     assert request.headers["User-Agent"].startswith("runsite-python/")
@@ -47,7 +48,7 @@ def test_sends_auth_and_user_agent(api: respx.MockRouter, transport: SyncTranspo
 def test_drops_none_query_params(api: respx.MockRouter, transport: SyncTransport) -> None:
     route = api.get("/keys").respond(200, json={})
 
-    transport.request("GET", "/keys", params={"page": 1, "size": None})
+    transport.run(single(Request("GET", "/keys", params={"page": 1, "size": None})))
 
     assert dict(route.calls.last.request.url.params) == {"page": "1"}
 
@@ -55,28 +56,28 @@ def test_drops_none_query_params(api: respx.MockRouter, transport: SyncTransport
 def test_empty_body_returns_none(api: respx.MockRouter, transport: SyncTransport) -> None:
     api.delete("/thing").respond(204)
 
-    assert transport.request("DELETE", "/thing") is None
+    assert transport.run(single(Request("DELETE", "/thing"))) is None
 
 
 def test_non_json_success_body_raises_connection_error(api: respx.MockRouter, transport: SyncTransport) -> None:
     api.get("/thing").respond(200, text="<html>proxy page</html>")
 
     with pytest.raises(APIConnectionError, match="not valid JSON"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
 
 
 def test_error_status_uses_error_factory(api: respx.MockRouter, transport: SyncTransport) -> None:
     api.get("/thing").respond(404, json={"detail": "Bucket not found"})
 
     with pytest.raises(NotFoundError, match="Bucket not found"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
 
 
 def test_redirect_status_is_an_error(api: respx.MockRouter, transport: SyncTransport) -> None:
     route = api.get("/thing").respond(302, headers={"Location": "https://elsewhere.test/"})
 
     with pytest.raises(APIStatusError, match=r"^302 Found$") as caught:
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert type(caught.value) is APIStatusError
     assert route.call_count == 1
 
@@ -87,7 +88,7 @@ def test_get_is_retried_on_retryable_status(
 ) -> None:
     route = api.get("/thing").mock(side_effect=[httpx.Response(status_code), httpx.Response(200, json={"ok": True})])
 
-    assert transport.request("GET", "/thing") == {"ok": True}
+    assert transport.run(single(Request("GET", "/thing"))) == {"ok": True}
     assert route.call_count == 2
     assert fake_clock.sleeps == [0.5]
 
@@ -96,7 +97,7 @@ def test_get_gives_up_after_max_retries(api: respx.MockRouter, transport: SyncTr
     route = api.get("/thing").mock(side_effect=[httpx.Response(503), httpx.Response(503), httpx.Response(503)])
 
     with pytest.raises(ServiceUnavailableError):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 3
     assert fake_clock.sleeps == [0.5, 1.0]
 
@@ -106,7 +107,7 @@ def test_retry_after_header_sets_delay(api: respx.MockRouter, transport: SyncTra
         side_effect=[httpx.Response(429, headers={"Retry-After": "20"}), httpx.Response(200, json={})]
     )
 
-    transport.request("GET", "/thing")
+    transport.run(single(Request("GET", "/thing")))
 
     assert fake_clock.sleeps == [20.0]
 
@@ -127,7 +128,7 @@ def test_write_is_not_retried_on_server_error(
     route = api.route(method=method, url="/thing").mock(side_effect=[httpx.Response(503)])
 
     with pytest.raises(ServiceUnavailableError):
-        transport.request(method, "/thing", json={})
+        transport.run(single(Request(method, "/thing", json={})))
     assert route.call_count == 1
     assert fake_clock.sleeps == []
 
@@ -141,7 +142,7 @@ def test_write_is_retried_when_request_never_left(
 ) -> None:
     route = api.post("/thing").mock(side_effect=[never_sent_error, httpx.Response(201, json={"id": 1})])
 
-    assert transport.request("POST", "/thing", json={}) == {"id": 1}
+    assert transport.run(single(Request("POST", "/thing", json={}))) == {"id": 1}
     assert route.call_count == 2
 
 
@@ -149,7 +150,7 @@ def test_write_read_timeout_is_not_retried(api: respx.MockRouter, transport: Syn
     route = api.post("/thing").mock(side_effect=[httpx.ReadTimeout("slow")])
 
     with pytest.raises(APITimeoutError, match="may or may not have been applied"):
-        transport.request("POST", "/thing", json={})
+        transport.run(single(Request("POST", "/thing", json={})))
     assert route.call_count == 1
 
 
@@ -157,7 +158,7 @@ def test_get_transport_error_is_retried_then_raised(api: respx.MockRouter, trans
     route = api.get("/thing").mock(side_effect=[httpx.ReadError("reset")] * 3)
 
     with pytest.raises(APIConnectionError, match="did not respond"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 3
 
 
@@ -165,7 +166,7 @@ def test_unreachable_host(api: respx.MockRouter, transport: SyncTransport) -> No
     api.get("/thing").mock(side_effect=[httpx.ConnectError("refused")] * 3)
 
     with pytest.raises(APIConnectionError, match="Could not reach") as caught:
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert type(caught.value) is APIConnectionError
 
 
@@ -176,7 +177,7 @@ def test_connect_timeout_raises_timeout_error(
     route = api.get("/thing").mock(side_effect=[timeout_error] * 3)
 
     with pytest.raises(APITimeoutError, match="Could not reach"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 3
 
 
@@ -194,7 +195,7 @@ def test_client_side_transport_error_is_not_retried(
     route = api.get("/thing").mock(side_effect=[client_error])
 
     with pytest.raises(APIConnectionError, match="Request to the Runsite service failed") as caught:
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert type(caught.value) is APIConnectionError
     assert route.call_count == 1
     assert fake_clock.sleeps == []
@@ -204,7 +205,7 @@ def test_remote_protocol_error_is_not_retried(api: respx.MockRouter, transport: 
     route = api.get("/thing").mock(side_effect=[httpx.RemoteProtocolError("Server disconnected")])
 
     with pytest.raises(APIConnectionError, match="did not respond"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 1
 
 
@@ -212,7 +213,7 @@ def test_redirect_loop_is_wrapped(api: respx.MockRouter, transport: SyncTranspor
     route = api.get("/thing").mock(side_effect=[httpx.TooManyRedirects("loop")])
 
     with pytest.raises(APIConnectionError, match="Request to the Runsite service failed"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 1
 
 
@@ -220,7 +221,7 @@ def test_invalid_url_is_a_configuration_error(api: respx.MockRouter, transport: 
     api.get("/thing").mock(side_effect=[httpx.InvalidURL("Invalid non-printable ASCII character in URL")])
 
     with pytest.raises(ConfigurationError, match="Invalid Runsite service URL"):
-        transport.request("GET", "/thing")
+        transport.run(single(Request("GET", "/thing")))
 
 
 def test_max_retries_zero_disables_retries(api: respx.MockRouter) -> None:
@@ -228,7 +229,7 @@ def test_max_retries_zero_disables_retries(api: respx.MockRouter) -> None:
     no_retry_transport = SyncTransport(lambda: make_settings(max_retries=0))
 
     with pytest.raises(ServiceUnavailableError):
-        no_retry_transport.request("GET", "/thing")
+        no_retry_transport.run(single(Request("GET", "/thing")))
     assert route.call_count == 1
 
 

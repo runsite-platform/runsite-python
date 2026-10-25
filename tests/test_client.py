@@ -1,9 +1,10 @@
 import respx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._errors import api_error_from_response
-from runsite._http import Request, RequestSettings, single
+from runsite._dialects import api_error_from_response
+from runsite._http import Request, RequestSettings
 from tests.constants import API_URL
+from tests.helpers import single
 
 
 class CountingSettings:

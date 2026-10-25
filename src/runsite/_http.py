@@ -55,6 +55,14 @@ async def _async_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def check_limits(timeout: float, max_retries: int) -> None:
+    """Reject a timeout that is not a positive finite number and a negative retry count."""
+    if not (isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout > 0):
+        raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be 0 or more, got {max_retries}")
+
+
 @dataclass(frozen=True)
 class RequestSettings:
     """Where and how one SDK client sends its requests."""
@@ -66,10 +74,7 @@ class RequestSettings:
     error_factory: ErrorFactory = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not (isinstance(self.timeout, (int, float)) and math.isfinite(self.timeout) and self.timeout > 0):
-            raise ValueError(f"timeout must be a positive number of seconds, got {self.timeout!r}")
-        if self.max_retries < 0:
-            raise ValueError(f"max_retries must be 0 or more, got {self.max_retries}")
+        check_limits(self.timeout, self.max_retries)
 
     def all_headers(self) -> dict[str, str]:
         return {"User-Agent": f"runsite-python/{__version__}", "Accept": "application/json", **self.headers}
@@ -227,11 +232,6 @@ def execute(settings: SettingsProvider, operation: Operation[ResultT]) -> Steps[
             failure = error
 
 
-def single(request: Request) -> Operation[Any]:
-    """An operation that sends one request and returns its parsed body."""
-    return (yield request)
-
-
 HTTP_ERRORS = (httpx.HTTPError, httpx.InvalidURL)
 
 
@@ -313,9 +313,6 @@ class SyncTransport:
     def run(self, operation: Operation[ResultT]) -> ResultT:
         return drive_sync(execute(self._settings, operation), self._client())
 
-    def request(self, method: str, path: str, *, params: Mapping[str, Any] | None = None, json: Any = None) -> Any:
-        return self.run(single(Request(method, path, params=params, json=json)))
-
     def close(self) -> None:
         if self._owned_client is not None:
             self._owned_client.close()
@@ -340,11 +337,6 @@ class AsyncTransport:
 
     async def run(self, operation: Operation[ResultT]) -> ResultT:
         return await drive_async(execute(self._settings, operation), self._client())
-
-    async def request(
-        self, method: str, path: str, *, params: Mapping[str, Any] | None = None, json: Any = None
-    ) -> Any:
-        return await self.run(single(Request(method, path, params=params, json=json)))
 
     async def aclose(self) -> None:
         if self._owned_client is not None:

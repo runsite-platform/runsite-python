@@ -6,9 +6,11 @@ import httpx
 import pytest
 import respx
 
+from runsite._environment import Environment
 from runsite._errors import ConfigurationError, ConflictError, NotFoundError, PermissionDeniedError
 from runsite._http import AsyncTransport, SyncTransport
 from runsite._secrets import ApplyResult, AsyncSecrets, BulkResult, Secrets
+from runsite._secrets.writer import resolve_service_id
 from tests.constants import API_KEY, BASE_URL, SERVICE_ID
 
 ENV_PATH = f"/web-services/{SERVICE_ID}/env"
@@ -425,3 +427,13 @@ async def test_async_close_closes_the_connection_pool(api: respx.MockRouter, mon
 def test_only_restarting_status_counts_as_restarting(status: str) -> None:
     assert ApplyResult(status=status).restarting is False
     assert ApplyResult(status="restarting").restarting is True
+
+
+def test_service_id_prefers_the_first_given_candidate() -> None:
+    environment = Environment({"RUNSITE_SERVICE_ID": "from-env"})
+
+    assert resolve_service_id(environment, "per-call", "per-client") == "per-call"
+    assert resolve_service_id(environment, None, "per-client") == "per-client"
+    assert resolve_service_id(environment, None, None) == "from-env"
+    with pytest.raises(ConfigurationError, match="RUNSITE_SERVICE_ID"):
+        resolve_service_id(Environment({}), None, None)

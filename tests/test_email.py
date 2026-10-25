@@ -204,6 +204,18 @@ def test_missing_key_fails_on_first_send() -> None:
         client.send(from_="a@b.com", to="c@d.com", subject="s", text="t")
 
 
+def test_invalid_message_is_reported_before_missing_configuration() -> None:
+    client = Email(environ={})
+    with pytest.raises(ValueError, match="html or text"):
+        client.send(from_="a@b.com", to="c@d.com", subject="s")
+
+
+async def test_async_invalid_message_is_reported_before_missing_configuration() -> None:
+    client = AsyncEmail(environ={})
+    with pytest.raises(ValueError, match="at least one recipient"):
+        await client.send(from_="a@b.com", to=[], subject="s", text="t")
+
+
 async def test_async_send(email_api: respx.MockRouter) -> None:
     email_api.post("").respond(200, json=SENT)
 

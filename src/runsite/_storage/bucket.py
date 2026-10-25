@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import warnings
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
 from typing import IO, Any, TypeAlias
@@ -77,6 +78,31 @@ def delete_failure_error(failures: list[dict[str, Any]]) -> StorageError:
     if codes <= ACCESS_DENIED_CODES:
         return StorageAccessDeniedError(f"{message}. {DELETE_DENIED_HINT}", code=first_code)
     return StorageError(message, code=first_code)
+
+
+@dataclass(frozen=True)
+class PresignPlan:
+    """What to sign for a `presigned_url` call, and the warning the caller should see, if any."""
+
+    operation: str
+    expires: int
+    warning: str | None = None
+
+
+def _plan_presign(method: str, expires: int) -> PresignPlan:
+    """Check the method and expiry; Runsite ignores `expires`, so anything but 900 earns a warning."""
+    operation = PRESIGN_METHODS.get(method.upper())
+    if operation is None:
+        raise ValueError(f"method must be one of {sorted(PRESIGN_METHODS)}")
+    if expires <= 0:
+        raise ValueError(f"expires must be a positive number of seconds, got {expires}")
+    if expires > MAX_PRESIGN_SECONDS:
+        warning = f"Runsite presigned URLs are valid for at most {MAX_PRESIGN_SECONDS} seconds; expires was capped"
+        return PresignPlan(operation, MAX_PRESIGN_SECONDS, warning)
+    if expires < MAX_PRESIGN_SECONDS:
+        warning = f"expires={expires} is not enforced by Runsite; the URL works for about {MAX_PRESIGN_SECONDS} seconds"
+        return PresignPlan(operation, expires, warning)
+    return PresignPlan(operation, expires)
 
 
 class Bucket:
@@ -207,29 +233,16 @@ class Bucket:
         Runsite does not enforce `expires`: every presigned URL works for about 15 minutes after signing.
         Values above 900 are capped and values below 900 trigger a warning; both are UserWarning.
         """
-        return self._sign(key, method, expires, warning_stacklevel=3)
+        return self._presigned_url(key, method, expires, stacklevel=3)
 
-    def _sign(self, key: str, method: str, expires: int, *, warning_stacklevel: int) -> str:
-        """Presign `key`; `warning_stacklevel` points warnings at the caller of the public method."""
-        operation = PRESIGN_METHODS.get(method.upper())
-        if operation is None:
-            raise ValueError(f"method must be one of {sorted(PRESIGN_METHODS)}")
-        if expires <= 0:
-            raise ValueError(f"expires must be a positive number of seconds, got {expires}")
-        if expires > MAX_PRESIGN_SECONDS:
-            warnings.warn(
-                f"Runsite presigned URLs are valid for at most {MAX_PRESIGN_SECONDS} seconds; expires was capped",
-                stacklevel=warning_stacklevel,
-            )
-            expires = MAX_PRESIGN_SECONDS
-        elif expires < MAX_PRESIGN_SECONDS:
-            warnings.warn(
-                f"expires={expires} is not enforced by Runsite; the URL works for about {MAX_PRESIGN_SECONDS} seconds",
-                stacklevel=warning_stacklevel,
-            )
+    def _presigned_url(self, key: str, method: str, expires: int, *, stacklevel: int) -> str:
+        """Check, warn and sign; `stacklevel` points the warning at the code that called the public method."""
+        plan = _plan_presign(method, expires)
+        if plan.warning:
+            warnings.warn(plan.warning, stacklevel=stacklevel)
         try:
             url: str = self.client.generate_presigned_url(
-                ClientMethod=operation, Params={"Bucket": self.name, "Key": key}, ExpiresIn=expires
+                ClientMethod=plan.operation, Params={"Bucket": self.name, "Key": key}, ExpiresIn=plan.expires
             )
         except Exception as error:
             raise _translate(error) from error
