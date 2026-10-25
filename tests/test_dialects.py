@@ -1,3 +1,5 @@
+from typing import TypedDict
+
 import pytest
 
 from runsite import AsyncEmail, AsyncSecrets, AsyncStorage, Email, Secrets, Storage
@@ -6,7 +8,13 @@ from runsite._environment import Environment
 from runsite._errors import ConfigurationError
 from tests.constants import API_KEY
 
-DEFAULT_LIMITS = {"timeout": 30.0, "max_retries": 2}
+
+class Limits(TypedDict):
+    timeout: float
+    max_retries: int
+
+
+DEFAULT_LIMITS: Limits = {"timeout": 30.0, "max_retries": 2}
 CLIENTS = [Email, AsyncEmail, Secrets, AsyncSecrets, Storage, AsyncStorage]
 
 
