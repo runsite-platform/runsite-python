@@ -10,8 +10,9 @@ from typing import Any
 import httpx
 import pytest
 
-from runsite._config import Environment
-from runsite._errors import ConflictError, NotFoundError, api_error_from_response
+from runsite._dialects import api_error_from_response
+from runsite._environment import Environment
+from runsite._errors import ConflictError, NotFoundError
 from runsite._http import Call, Operation, Request, RequestSettings, Wait, execute
 from runsite._secrets.writer import SecretsOperations
 from runsite._storage.control import create_key

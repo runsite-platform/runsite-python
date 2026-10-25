@@ -7,8 +7,6 @@ from typing import Any
 
 import httpx
 
-MAX_TEXT_DETAIL_LENGTH = 500
-
 
 class RunsiteError(Exception):
     """Base class for every error raised by the SDK."""
@@ -202,69 +200,3 @@ def validation_errors(detail: list[Any]) -> list[tuple[str, str]]:
         location = ".".join(str(part) for part in item.get("loc", []) if part not in LOCATION_PREFIXES)
         pairs.append((location, str(item.get("msg", "invalid value"))))
     return pairs
-
-
-def _json_body(response: httpx.Response) -> Any:
-    try:
-        return response.json()
-    except ValueError:
-        return None
-
-
-def _text_body(response: httpx.Response) -> str | None:
-    """Plain-text error body (for example an axum rejection), shortened; None when empty."""
-    return response.text.strip()[:MAX_TEXT_DETAIL_LENGTH] or None
-
-
-def _status_class(status_code: int) -> type[APIStatusError]:
-    error_class = STATUS_ERROR_CLASSES.get(status_code)
-    if error_class is not None:
-        return error_class
-    return InternalServerError if status_code >= 500 else APIStatusError
-
-
-def _describe_api_detail(detail: Any) -> str:
-    if isinstance(detail, str):
-        return detail
-    if isinstance(detail, list):
-        return "; ".join(f"{field}: {message}" if field else message for field, message in validation_errors(detail))
-    if isinstance(detail, dict):
-        if detail.get("code") == "insufficient_scope":
-            return f"API key scope '{detail.get('actual')}' is below the required '{detail.get('required')}'"
-        if detail.get("code"):
-            reason = detail.get("reason") or detail.get("message")
-            return f"{detail['code']}: {reason}" if reason else str(detail["code"])
-    return ""
-
-
-def api_error_from_response(response: httpx.Response) -> APIStatusError:
-    """Build the error for a /api/v1 error response ({"detail": ...})."""
-    body = _json_body(response)
-    if isinstance(body, dict):
-        detail = body.get("detail")
-    elif body is None:
-        detail = _text_body(response)
-    else:
-        detail = None
-    description = _describe_api_detail(detail) or response.reason_phrase
-    error_class = _status_class(response.status_code)
-    return error_class(f"{response.status_code} {description}", response=response, detail=detail)
-
-
-def email_error_from_response(response: httpx.Response) -> APIStatusError:
-    """Build the error for an email API response ({"error": {...}} or {"error": "..."})."""
-    body = _json_body(response)
-    if isinstance(body, dict):
-        error = body.get("error")
-    elif body is None:
-        error = _text_body(response)
-    else:
-        error = None
-    message: Any = None
-    if isinstance(error, dict):
-        message = error.get("message")
-    elif isinstance(error, str):
-        message = error
-    status_code = response.status_code
-    error_class = _status_class(status_code)
-    return error_class(f"{status_code} {message or response.reason_phrase}", response=response, detail=error)

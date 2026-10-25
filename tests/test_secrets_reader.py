@@ -1,7 +1,8 @@
 import pytest
 
 from runsite._errors import InvalidSecretError, MissingSecretError
-from runsite._secrets.reader import Secret, SecretReader
+from runsite._secret import Secret
+from runsite._secrets.reader import SecretReader
 
 
 def reader_with(**variables: str) -> SecretReader:

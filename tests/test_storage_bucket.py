@@ -9,7 +9,7 @@ import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
-from runsite._config import Environment, s3_credentials
+from runsite._environment import Environment
 from runsite._errors import ConfigurationError, ObjectNotFoundError, StorageAccessDeniedError, StorageError
 from runsite._storage.async_bucket import AsyncBucket
 from runsite._storage.bucket import (
@@ -20,7 +20,7 @@ from runsite._storage.bucket import (
 )
 from runsite._storage.control import AsyncStorage, Storage
 from runsite._storage.models import AccessKey
-from runsite._storage.registry import BucketRegistry, make_s3_client
+from runsite._storage.registry import BucketRegistry, make_s3_client, s3_credentials
 
 AWS_VARIABLES = (
     "AWS_ACCESS_KEY_ID",
@@ -344,6 +344,23 @@ def test_presigned_url_rejects_non_positive_expiry(expires: int) -> None:
 
     with pytest.raises(ValueError, match="expires"):
         bucket.presigned_url("a.txt", expires=expires)
+
+
+@pytest.mark.parametrize(("method", "operation"), [("get", "get_object"), ("HEAD", "head_object")])
+def test_presigned_url_method_is_case_insensitive(method: str, operation: str) -> None:
+    bucket, fake = make_bucket()
+
+    bucket.presigned_url("a.txt", method=method)
+
+    assert fake.calls[0][1]["method"] == operation
+
+
+def test_presigned_url_rejects_unknown_method() -> None:
+    bucket, fake = make_bucket()
+
+    with pytest.raises(ValueError, match="method"):
+        bucket.presigned_url("a.txt", method="POST")
+    assert fake.calls == []
 
 
 def test_public_url_is_path_style() -> None:

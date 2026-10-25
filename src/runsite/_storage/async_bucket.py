@@ -93,7 +93,7 @@ class AsyncBucket:
 
     def presigned_url(self, key: str, *, method: str = "GET", expires: int = MAX_PRESIGN_SECONDS) -> str:
         """See `Bucket.presigned_url`; signing is local, so this stays synchronous."""
-        return self.sync._sign(key, method, expires, warning_stacklevel=3)
+        return self.sync._presigned_url(key, method, expires, stacklevel=3)
 
     def public_url(self, key: str) -> str:
         return self.sync.public_url(key)

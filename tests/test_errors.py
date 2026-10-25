@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
+from runsite._dialects import api_error_from_response, email_error_from_response
 from runsite._errors import (
     APIStatusError,
     AuthenticationError,
@@ -17,8 +18,6 @@ from runsite._errors import (
     ServiceUnavailableError,
     UnprocessableEntityError,
     UpstreamError,
-    api_error_from_response,
-    email_error_from_response,
     parse_retry_after,
 )
 

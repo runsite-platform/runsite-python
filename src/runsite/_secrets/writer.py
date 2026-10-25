@@ -3,13 +3,13 @@ from __future__ import annotations
 import builtins
 import re
 from collections.abc import Iterable, Mapping
-from functools import partial
 from typing import Any
 
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._config import Environment, platform_settings, resolve_service_id
+from runsite._dialects import platform_api
+from runsite._environment import Environment
 from runsite._errors import ConflictError
 from runsite._http import Operation, Request
 from runsite._secrets.models import ApplyResult, BulkResult, EnvVariable
@@ -19,6 +19,7 @@ KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*")
 MAX_KEY_LENGTH = 255
 RESERVED_KEYS = frozenset({"APP_PORT", "APP_NAME", "RUNSITE_SERVICE_ID"})
 VALID_PORTS = range(1, 65536)
+SERVICE_ID_HINT = "It is set automatically inside Runsite containers; elsewhere pass service_id=..."
 
 
 def _is_valid_port(value: str) -> bool:
@@ -43,6 +44,12 @@ def validate_variable(key: str, value: object) -> None:
         raise ValueError(f"{key}: value must not be empty")
     if key == "PORT" and not _is_valid_port(value):
         raise ValueError("PORT must be an integer between 1 and 65535")
+
+
+def resolve_service_id(environment: Environment, *candidates: str | None) -> str:
+    """The first given service id, else RUNSITE_SERVICE_ID."""
+    explicit = next((candidate for candidate in candidates if candidate), None)
+    return environment.require(explicit, "RUNSITE_SERVICE_ID", hint=SERVICE_ID_HINT)
 
 
 def env_path(service_id: str) -> str:
@@ -154,13 +161,8 @@ class Secrets(SecretReader, SyncClient):
         environ: Mapping[str, str] | None = None,
     ) -> None:
         SecretReader.__init__(self, environ=environ)
-        settings = partial(
-            platform_settings,
-            self._environment,
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = platform_api(
+            self._environment, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
         )
         SyncClient.__init__(self, settings, http_client=http_client)
         self._operations = SecretsOperations(self._environment, service_id=service_id)
@@ -182,6 +184,9 @@ class Secrets(SecretReader, SyncClient):
         False sets the flag on every listed variable. Keys and values are validated before any request
         (`ValueError`, or `TypeError` for a non-str value). If another writer creates one of the keys at the
         same moment, the read-and-write is repeated once; a second conflict raises `ConflictError`.
+
+        Reads such as `get` still return the old value: they see this process's environment, which changes
+        only after `apply()` restarts the service.
         """
         return self._run(self._operations.set_many(values, secret, service_id))
 
@@ -218,13 +223,8 @@ class AsyncSecrets(SecretReader, AsyncClient):
         environ: Mapping[str, str] | None = None,
     ) -> None:
         SecretReader.__init__(self, environ=environ)
-        settings = partial(
-            platform_settings,
-            self._environment,
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = platform_api(
+            self._environment, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
         )
         AsyncClient.__init__(self, settings, http_client=http_client)
         self._operations = SecretsOperations(self._environment, service_id=service_id)

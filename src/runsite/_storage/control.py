@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from functools import partial
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from runsite._client import AsyncClient, SyncClient
-from runsite._config import Environment, platform_settings
+from runsite._dialects import platform_api
+from runsite._environment import Environment
 from runsite._http import Operation, Request
 from runsite._storage.async_bucket import AsyncBucket
 from runsite._storage.bucket import Bucket
@@ -111,13 +111,8 @@ class Storage(SyncClient):
     ) -> None:
         environment = Environment(environ)
         self._buckets = BucketRegistry(environment)
-        settings = partial(
-            platform_settings,
-            environment,
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = platform_api(
+            environment, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
         )
         super().__init__(settings, http_client=http_client)
 
@@ -194,13 +189,8 @@ class AsyncStorage(AsyncClient):
     ) -> None:
         environment = Environment(environ)
         self._buckets = BucketRegistry(environment)
-        settings = partial(
-            platform_settings,
-            environment,
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=max_retries,
+        settings = platform_api(
+            environment, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
         )
         super().__init__(settings, http_client=http_client)
 
